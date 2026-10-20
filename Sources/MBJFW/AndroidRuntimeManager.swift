@@ -273,7 +273,13 @@ final class AndroidRuntimeManager {
         launchTask = Task { @MainActor in
             defer { isLaunching = false }
             do {
-                try await session.launch(apk: apk, account: account, dataDirectory: dataDirectory, settings: profileSettings, paths: paths) { stage, detail in
+                try await session.launch(
+                    apk: apk,
+                    account: account,
+                    dataDirectory: dataDirectory,
+                    settings: profileSettings,
+                    paths: paths
+                ) { stage, detail in
                     self.markProgress(stage: stage, detail: detail)
                 }
                 finishActiveStep()
@@ -328,7 +334,7 @@ final class AndroidRuntimeManager {
                         }
                     }
                 }
-                if ticks.isMultiple(of: 5) { await refreshPointerCaptureRequest() }
+                if ticks.isMultiple(of: 10) { await refreshPointerCaptureRequest() }
                 ticks += 1
                 do { try await Task.sleep(for: .milliseconds(100)) } catch { break }
             }
@@ -340,7 +346,7 @@ final class AndroidRuntimeManager {
         foregroundTask = Task { @MainActor in
             while !Task.isCancelled && isGameRunning {
                 do {
-                    try await Task.sleep(for: .seconds(2))
+                    try await Task.sleep(for: .seconds(5))
                     if try await session.restoreGameForeground(paths: paths) {
                         statusMessage = "Minecraft returned to the foreground."
                         showInGameNotice(statusMessage)

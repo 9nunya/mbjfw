@@ -28,7 +28,7 @@ Requirements: macOS 15 or newer and Xcode command-line tools to build from sourc
 2. Add your APK, select **Play now**, then accept the Android SDK terms in MBJFW. It downloads and sets up the runtime automatically.
 3. Sign in to Microsoft/Xbox inside Bedrock. Add more MBJFW account profiles to keep each profile's Android data, sign-in, worlds, and settings separate.
 
-Build the local installer with `./scripts/build-pkg.sh`. Pushing a version tag such as `v1.0.0` runs release builds on Apple Silicon and Intel, then attaches both app archives and installers with checksums to a draft GitHub release. See [Distribution and signing](docs/DISTRIBUTION.md).
+Build the local installer with `./scripts/build-pkg.sh`. Pushing a version tag such as `v1.0.1` runs release builds on Apple Silicon and Intel, then attaches both app archives and installers with checksums to a draft GitHub release. See [Distribution and signing](docs/DISTRIBUTION.md).
 
 APKs are copied locally into `~/Library/Application Support/MBJFW/apks/` and installed with `adb`. MBJFW does not contact Google Play, launch the Play Store, or apply an ownership/purchase check. It accepts one APK per import; split APK sets are not merged yet.
 

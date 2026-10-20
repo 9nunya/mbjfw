@@ -60,8 +60,11 @@ struct LauncherView: View {
             SDKConsentView()
                 .environment(library)
         }
-        .onChange(of: library.progressToken) { _, _ in
-            openWindow(id: "game")
+        .onChange(of: library.progressWindowRequests) { oldRequests, newRequests in
+            let opened = Set(oldRequests.map(\.id))
+            for request in newRequests where !opened.contains(request.id) {
+                openWindow(id: "game", value: request.accountID)
+            }
         }
     }
 }

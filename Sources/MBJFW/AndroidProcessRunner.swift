@@ -10,6 +10,7 @@ enum AndroidProcessRunner {
         environment: [String: String],
         logURL: URL,
         input: String? = nil,
+        timeout: Duration? = nil,
         progress: (@MainActor @Sendable (String) -> Void)? = nil
     ) async throws -> String {
         try FileManager.default.createDirectory(
@@ -47,26 +48,60 @@ enum AndroidProcessRunner {
             try inputPipe.fileHandleForWriting.write(contentsOf: Data(input.utf8))
             try inputPipe.fileHandleForWriting.close()
         }
-        let exitStatus: Int32 = try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
+        var processTimedOut = false
+        var timeoutTask: Task<Void, Never>?
+        let exitStatus: Int32
+        do {
+            exitStatus = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { completed in
                     continuation.resume(returning: completed.terminationStatus)
                 }
                 do {
                     if Task.isCancelled { throw CancellationError() }
                     try process.run()
+                    if let timeout {
+                        timeoutTask = Task { @MainActor in
+                            try? await Task.sleep(for: timeout)
+                            guard !Task.isCancelled, process.isRunning else { return }
+                            processTimedOut = true
+                            let identifier = process.processIdentifier
+                            process.terminate()
+                            try? await Task.sleep(for: .seconds(2))
+                            guard !Task.isCancelled, process.isRunning,
+                                  process.processIdentifier == identifier else { return }
+                            kill(identifier, SIGKILL)
+                        }
+                    }
                 } catch {
                     continuation.resume(throwing: error)
                 }
+                }
+            } onCancel: {
+                guard process.isRunning else { return }
+                let identifier = process.processIdentifier
+                process.terminate()
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard process.isRunning, process.processIdentifier == identifier else { return }
+                    kill(identifier, SIGKILL)
+                }
             }
-        } onCancel: {
-            if process.isRunning { process.terminate() }
+        } catch {
+            timeoutTask?.cancel()
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            try? logHandle.close()
+            throw error
         }
+        timeoutTask?.cancel()
         outputPipe.fileHandleForReading.readabilityHandler = nil
         capture.consume(outputPipe.fileHandleForReading.readDataToEndOfFile())
         try logHandle.close()
         let output = capture.output
         try Task.checkCancellation()
+        if processTimedOut {
+            throw AndroidCommandTimedOut(command: invocation, timeout: timeout ?? .zero)
+        }
         guard exitStatus == 0 else {
             throw AndroidCommandError(command: invocation, status: exitStatus, output: output)
         }
@@ -77,6 +112,15 @@ enum AndroidProcessRunner {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+}
+
+struct AndroidCommandTimedOut: LocalizedError {
+    let command: String
+    let timeout: Duration
+
+    var errorDescription: String? {
+        "\(command) did not finish within \(Int(timeout.components.seconds)) seconds."
+    }
 }
 
 private final class ProcessOutputCapture: @unchecked Sendable {

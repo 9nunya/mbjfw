@@ -58,8 +58,9 @@ enum AndroidSDKInstaller {
             return (pair[0], pair[1])
         })
         values["hw.keyboard"] = "yes"
-        // The emulator's generic resizable-device profile enables its public
-        // multi-config HWC path without opting into Pixel Fold overlays.
+        values["hw.audioInput"] = "yes"
+        values["hw.audioOutput"] = "yes"
+        // Keep the established generic resizable profile used by the HWC modes.
         values["hw.device.name"] = "resizable"
         values["hw.device.manufacturer"] = "Android"
         values.removeValue(forKey: "hw.device.hash2")

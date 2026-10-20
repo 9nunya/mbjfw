@@ -98,13 +98,208 @@ final class RuntimeRegressionTests: XCTestCase {
     func testProfileAPKAndSettingsPersistIndependentlyThroughCodable() throws {
         let first = PlayerAccount(
             id: UUID(), name: "Survival", selectedBuildID: "build-a",
-            settings: ProfileSettings(graphicsMode: "host", guestResolution: "1920x1080", guestDensity: "200", guestMemory: 6144, guestCores: 6, disableGameAudio: true, displayFollowsWindow: false)
+            settings: ProfileSettings(graphicsMode: "host", guestResolution: "1920x1080", guestDensity: "200", guestMemory: 6144, guestCores: 6, disableGameAudio: true, hostMicrophoneEnabled: true, displayFollowsWindow: false)
         )
         let second = PlayerAccount(id: UUID(), name: "Creative", selectedBuildID: "build-b")
         let decoded = try JSONDecoder().decode([PlayerAccount].self, from: JSONEncoder().encode([first, second]))
         XCTAssertEqual(decoded, [first, second])
         XCTAssertNotEqual(decoded[0].selectedBuildID, decoded[1].selectedBuildID)
         XCTAssertNotEqual(decoded[0].settings, decoded[1].settings)
+    }
+
+    func testOlderProfileSettingsDecodeWithMicrophoneDisabled() throws {
+        let encoded = #"{"id":"AB25EC78-B362-4107-BF28-60EEAACAC652","name":"Survival","settings":{"graphicsMode":"host","guestResolution":"1920x1080","guestDensity":"160","guestMemory":4096,"guestCores":4,"disableGameAudio":false,"displayFollowsWindow":true}}"#.data(using: .utf8)!
+        let account = try JSONDecoder().decode(PlayerAccount.self, from: encoded)
+        XCTAssertFalse(account.settings.hostMicrophoneEnabled)
+        XCTAssertEqual(account.settings.guestResolution, "1920x1080")
+    }
+
+    func testEmulatorFlagsKeepHWCResizeWithoutPixelFoldOverlay() {
+        let features = Set(AndroidEmulatorLaunchOptions.features.split(separator: ",").map(String.init))
+        XCTAssertTrue(features.contains("HWCMultiConfigs"))
+        XCTAssertTrue(features.contains("-SupportPixelFold"))
+        XCTAssertFalse(features.contains("SupportPixelFold"))
+        XCTAssertTrue(features.contains("-DeviceSkinOverlay"))
+        XCTAssertEqual(AndroidEmulatorLaunchOptions.displayArguments, ["-qt-hide-window"])
+    }
+
+    func testAndroidBootWaitsForActivityAndPackageServicesAfterBootProperty() {
+        XCTAssertFalse(AndroidBootReadiness.isReady(
+            bootCompleted: "1",
+            activityService: "Service activity: not found",
+            packageService: "Service package: found"
+        ))
+        XCTAssertFalse(AndroidBootReadiness.isReady(
+            bootCompleted: "1",
+            activityService: "Service activity: found",
+            packageService: nil
+        ))
+        XCTAssertTrue(AndroidBootReadiness.isReady(
+            bootCompleted: "1\n",
+            activityService: "Service activity: found",
+            packageService: "Service package: found"
+        ))
+    }
+
+    @MainActor
+    func testOptionalPackageManagerDisconnectDoesNotBecomeFatalProvisioningError() {
+        let brokenPipe = AndroidCommandError(
+            command: "adb -s emulator-5580 shell pm disable-user --user 0 com.android.camera2",
+            status: 224,
+            output: "Failure calling service package: Broken pipe (32)"
+        )
+        let unrelatedFailure = AndroidCommandError(
+            command: "adb -s emulator-5580 shell pm disable-user --user 0 com.android.camera2",
+            status: 1,
+            output: "Unknown package: com.android.camera2"
+        )
+
+        XCTAssertTrue(AndroidAppliancePolicy.isTransientPackageServiceFailure(brokenPipe))
+        XCTAssertFalse(AndroidAppliancePolicy.isTransientPackageServiceFailure(unrelatedFailure))
+
+        let result = AndroidApplianceResult(disabledPackages: 12, skippedPackages: ["com.android.camera2"])
+        XCTAssertTrue(result.progressDetail.contains("12 optional apps disabled"))
+        XCTAssertTrue(result.progressDetail.contains("com.android.camera2"))
+    }
+
+    @MainActor
+    func testLegacyDisabledPackageVerifierCanBeDetectedForInstallRecovery() {
+        let disabled = AndroidAppliancePolicy.disabledPackageNames(in: """
+            package:com.android.vending
+            package:com.google.android.apps.photos
+            """)
+        XCTAssertTrue(disabled.contains("com.android.vending"))
+        XCTAssertFalse(AndroidAppliancePolicy.disabledPackageNames(in: "package:com.google.android.apps.photos\n").contains("com.android.vending"))
+    }
+
+    @MainActor
+    func testAPKInstallRetryUsesPushModeAndKeepsProfileData() {
+        let firstAttempt = AndroidAppliancePolicy.installArguments(
+            apkPath: "/tmp/minecraft.apk",
+            attempt: 0,
+            testOnly: false
+        )
+        let retry = AndroidAppliancePolicy.installArguments(
+            apkPath: "/tmp/minecraft.apk",
+            attempt: 1,
+            testOnly: false
+        )
+        let appliance = AndroidAppliancePolicy.installArguments(
+            apkPath: "/tmp/appliance.apk",
+            attempt: 1,
+            testOnly: true
+        )
+
+        XCTAssertEqual(firstAttempt, ["install", "-r", "/tmp/minecraft.apk"])
+        XCTAssertEqual(retry, ["install", "-r", "--no-streaming", "/tmp/minecraft.apk"])
+        XCTAssertTrue(retry.contains("-r"), "Retries must update in place and preserve Minecraft profile data.")
+        XCTAssertTrue(appliance.contains("-t"), "The appliance APK is a test package.")
+    }
+
+    func testAudioRoutesThroughCoreAudioAndEnablesMicOnlyByProfileOptIn() {
+        let outputOnly = EmulatorAudioConfiguration(settings: .default)
+        XCTAssertEqual(outputOnly.arguments, [])
+        XCTAssertEqual(outputOnly.environment["QEMU_AUDIO_OUT_DRV"], "coreaudio")
+        XCTAssertEqual(outputOnly.environment["QEMU_AUDIO_IN_DRV"], "none")
+
+        var microphoneProfile = ProfileSettings.default
+        microphoneProfile.hostMicrophoneEnabled = true
+        let microphone = EmulatorAudioConfiguration(settings: microphoneProfile)
+        XCTAssertEqual(microphone.arguments, ["-allow-host-audio"])
+        XCTAssertEqual(microphone.environment["QEMU_AUDIO_IN_DRV"], "coreaudio")
+
+        microphoneProfile.disableGameAudio = true
+        let microphoneOnly = EmulatorAudioConfiguration(settings: microphoneProfile)
+        XCTAssertEqual(microphoneOnly.environment["QEMU_AUDIO_OUT_DRV"], "none")
+        XCTAssertEqual(microphoneOnly.environment["QEMU_AUDIO_IN_DRV"], "coreaudio")
+        XCTAssertFalse(microphoneOnly.arguments.contains("-no-audio"))
+    }
+
+    @MainActor
+    func testProfileAVDsUseSeparateRegistriesAndKeepAudioHardwareEnabled() async throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = AndroidSDKPaths(root: root.appending(path: "runtime"))
+        let template = paths.avdHome.appending(path: "MBJFW.avd/config.ini")
+        try FileManager.default.createDirectory(at: template.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try "hw.audioInput=no\nhw.audioOutput=no\nhw.device.name=resizable\nhw.ramSize=4096\n".write(to: template, atomically: true, encoding: .utf8)
+
+        let first = PlayerAccount(id: UUID(), name: "First")
+        let second = PlayerAccount(id: UUID(), name: "Second")
+        let firstDirectory = root.appending(path: "accounts/\(first.id.uuidString)/android-avd")
+        let secondDirectory = root.appending(path: "accounts/\(second.id.uuidString)/android-avd")
+        let firstRegistry = try await ProfileDevice.prepare(account: first, directory: firstDirectory, settings: .default, paths: paths)
+        let secondRegistry = try await ProfileDevice.prepare(account: second, directory: secondDirectory, settings: .default, paths: paths)
+
+        XCTAssertNotEqual(firstRegistry, secondRegistry)
+        let firstConfig = try String(contentsOf: firstDirectory.appending(path: "config.ini"), encoding: .utf8)
+        let secondConfig = try String(contentsOf: secondDirectory.appending(path: "config.ini"), encoding: .utf8)
+        XCTAssertTrue(firstConfig.contains("hw.audioInput=yes"))
+        XCTAssertTrue(firstConfig.contains("hw.audioOutput=yes"))
+        XCTAssertTrue(firstConfig.contains("hw.device.name=resizable"))
+        XCTAssertTrue(secondConfig.contains("disk.dataPartition.path=\(secondDirectory.appending(path: "userdata-qemu.img").path)"))
+        XCTAssertFalse(firstConfig.contains("disk.dataPartition.path=\(secondDirectory.path)"))
+    }
+
+    @MainActor
+    func testEmulatorBootGateSerializesColdBoots() async throws {
+        let gate = EmulatorBootGate()
+        var events: [String] = []
+        let first = Task { @MainActor in
+            let waited = try await gate.acquire()
+            XCTAssertFalse(waited)
+            events.append("first-start")
+            try await Task.sleep(for: .milliseconds(40))
+            events.append("first-end")
+            gate.release()
+        }
+        let second = Task { @MainActor in
+            let waited = try await gate.acquire()
+            XCTAssertTrue(waited)
+            events.append("second-start")
+            gate.release()
+        }
+        try await first.value
+        try await second.value
+        XCTAssertEqual(events, ["first-start", "first-end", "second-start"])
+    }
+
+    @MainActor
+    func testEmulatorPortLeasesAreDistinctAndReleasedAfterStop() throws {
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let first = try EmulatorPortLease.reserve(in: root, adbDevices: "List of devices attached\n")
+        let second = try EmulatorPortLease.reserve(in: root, adbDevices: "List of devices attached\n")
+        XCTAssertEqual(first.port, 5580)
+        XCTAssertEqual(second.port, 5582)
+
+        first.release()
+        let replacement = try EmulatorPortLease.reserve(
+            in: root,
+            adbDevices: "List of devices attached\nemulator-5582\toffline\n"
+        )
+        XCTAssertEqual(replacement.port, 5580)
+        second.release()
+        replacement.release()
+    }
+
+    @MainActor
+    func testAndroidCommandTimeoutTerminatesWaitingSubprocess() async throws {
+        let log = FileManager.default.temporaryDirectory.appending(path: "mbjfw-timeout-\(UUID()).log")
+        defer { try? FileManager.default.removeItem(at: log) }
+
+        do {
+            _ = try await AndroidProcessRunner.run(
+                URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["10"],
+                environment: [:],
+                logURL: log,
+                timeout: .milliseconds(50)
+            )
+            XCTFail("Expected the sleeping command to time out")
+        } catch is AndroidCommandTimedOut {
+        }
     }
 
     func testNativeNoticeSharedMemoryRoundTrip() throws {

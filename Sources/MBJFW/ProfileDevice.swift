@@ -37,6 +37,8 @@ enum ProfileDevice {
         let width = dimensions.first ?? 1280
         let height = dimensions.dropFirst().first ?? 720
         values["hw.keyboard"] = "yes"
+        values["hw.audioInput"] = "yes"
+        values["hw.audioOutput"] = "yes"
         values["hw.device.name"] = "resizable"
         values["hw.device.manufacturer"] = "Android"
         values.removeValue(forKey: "hw.device.hash2")

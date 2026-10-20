@@ -24,8 +24,13 @@ struct MBJFWApp: App {
             }
         }
 
-        Window("Bedrock", id: "game") {
-            GameWindowView().environment(library)
+        WindowGroup("Bedrock", id: "game", for: UUID.self) { $accountID in
+            if let accountID {
+                GameWindowView(accountID: accountID).environment(library)
+            } else {
+                ContentUnavailableView("Choose a Profile", systemImage: "person.crop.circle")
+                    .frame(minWidth: 560, minHeight: 400)
+            }
         }
         .defaultSize(width: 1024, height: 640)
         .restorationBehavior(.disabled)

@@ -35,11 +35,33 @@ struct ProfileSettings: Codable, Equatable {
     var guestMemory: Int
     var guestCores: Int
     var disableGameAudio: Bool
+    var hostMicrophoneEnabled: Bool = false
     var displayFollowsWindow: Bool
+
+    init(
+        graphicsMode: String,
+        guestResolution: String,
+        guestDensity: String,
+        guestMemory: Int,
+        guestCores: Int,
+        disableGameAudio: Bool,
+        hostMicrophoneEnabled: Bool = false,
+        displayFollowsWindow: Bool
+    ) {
+        self.graphicsMode = graphicsMode
+        self.guestResolution = guestResolution
+        self.guestDensity = guestDensity
+        self.guestMemory = guestMemory
+        self.guestCores = guestCores
+        self.disableGameAudio = disableGameAudio
+        self.hostMicrophoneEnabled = hostMicrophoneEnabled
+        self.displayFollowsWindow = displayFollowsWindow
+    }
 
     static let `default` = ProfileSettings(
         graphicsMode: "host", guestResolution: "1280x720", guestDensity: "160",
-        guestMemory: 4096, guestCores: 4, disableGameAudio: false, displayFollowsWindow: true
+        guestMemory: 4096, guestCores: 4, disableGameAudio: false,
+        hostMicrophoneEnabled: false, displayFollowsWindow: true
     )
 
     static var legacyDefaults: ProfileSettings {
@@ -51,8 +73,27 @@ struct ProfileSettings: Codable, Equatable {
             guestMemory: defaults.integer(forKey: "guestMemory") == 0 ? 4096 : defaults.integer(forKey: "guestMemory"),
             guestCores: defaults.integer(forKey: "guestCores") == 0 ? 4 : defaults.integer(forKey: "guestCores"),
             disableGameAudio: defaults.bool(forKey: "disableGameAudio"),
+            hostMicrophoneEnabled: false,
             displayFollowsWindow: defaults.object(forKey: "displayFollowsWindow") as? Bool ?? true
         )
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case graphicsMode, guestResolution, guestDensity, guestMemory, guestCores
+        case disableGameAudio, hostMicrophoneEnabled, displayFollowsWindow
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = Self.default
+        graphicsMode = try values.decodeIfPresent(String.self, forKey: .graphicsMode) ?? defaults.graphicsMode
+        guestResolution = try values.decodeIfPresent(String.self, forKey: .guestResolution) ?? defaults.guestResolution
+        guestDensity = try values.decodeIfPresent(String.self, forKey: .guestDensity) ?? defaults.guestDensity
+        guestMemory = try values.decodeIfPresent(Int.self, forKey: .guestMemory) ?? defaults.guestMemory
+        guestCores = try values.decodeIfPresent(Int.self, forKey: .guestCores) ?? defaults.guestCores
+        disableGameAudio = try values.decodeIfPresent(Bool.self, forKey: .disableGameAudio) ?? defaults.disableGameAudio
+        hostMicrophoneEnabled = try values.decodeIfPresent(Bool.self, forKey: .hostMicrophoneEnabled) ?? defaults.hostMicrophoneEnabled
+        displayFollowsWindow = try values.decodeIfPresent(Bool.self, forKey: .displayFollowsWindow) ?? defaults.displayFollowsWindow
     }
 }
 

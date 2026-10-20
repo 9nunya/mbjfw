@@ -1,11 +1,13 @@
 import SwiftUI
 
 struct GameWindowView: View {
+    let accountID: UUID
+
     @Environment(GameLibrary.self) private var library
     @Environment(\.dismissWindow) private var dismissWindow
 
     private var runtime: AndroidRuntimeManager {
-        library.runtime(for: library.progressAccountID ?? library.accounts.selectedAccountID)
+        library.runtime(for: accountID)
     }
 
     var body: some View {
@@ -24,7 +26,7 @@ struct GameWindowView: View {
         .navigationTitle("Minecraft")
         .onChange(of: runtime.isGameRunning) { _, running in
             if running {
-                dismissWindow(id: "game")
+                dismissWindow(id: "game", value: accountID)
                 runtime.focusGameWindow()
             }
         }

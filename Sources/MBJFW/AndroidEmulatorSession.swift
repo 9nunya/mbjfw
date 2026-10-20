@@ -12,9 +12,11 @@ final class AndroidEmulatorSession {
     private var emulatorLogHandle: FileHandle?
     private var activeAccountID: UUID?
     private var activeSerial: String?
+    private var lastTerminationStatus: Int32?
     private var nativeSession: MBJFWNativeSession?
     private var nativeSessionName: String?
     private var reservedPort: Int?
+    private var portLease: EmulatorPortLease?
     private var terminationWaiters: [CheckedContinuation<Void, Never>] = []
     @ObservationIgnored var onProcessExit: (() -> Void)?
     var serial: String? { activeSerial }
@@ -54,6 +56,10 @@ final class AndroidEmulatorSession {
         paths: AndroidSDKPaths,
         progress: @MainActor (GameLaunchStage, String) -> Void
     ) async throws {
+        var ownsColdStartGate = false
+        defer {
+            if ownsColdStartGate { EmulatorBootGate.shared.release() }
+        }
         if activeAccountID != account.id { await stop(paths: paths) }
         let adb = paths.adb
         var serial = activeSerial
@@ -81,7 +87,9 @@ final class AndroidEmulatorSession {
                 environment: paths.environment(javaHome: paths.javaHome),
                 logURL: paths.launchLog
             )
-            let port = try Self.availablePort(in: devices)
+            let portLease = try EmulatorPortLease.reserve(in: paths.root, adbDevices: devices)
+            let port = portLease.port
+            self.portLease = portLease
             reservedPort = port
             serial = "emulator-\(port)"
             if let nativeSession {
@@ -97,24 +105,25 @@ final class AndroidEmulatorSession {
             let emulator = Process()
             emulator.executableURL = try NativeRuntimeBundle.prepare(paths: paths)
             let graphicsMode = settings.graphicsMode
+            let audio = EmulatorAudioConfiguration(settings: settings)
             var arguments = [
                 "-avd", "MBJFW",
                 "-datadir", dataDirectory.path,
                 "-port", "\(port)",
                 "-gpu", graphicsMode == "software" ? "swangle" : "host",
-                "-feature", "Vulkan,GuestAngle,VirtioInput,VirtioMouse,VirtioDualModeMouse,HWCMultiConfigs,-SupportPixelFold,-DeviceSkinOverlay",
+                "-feature", AndroidEmulatorLaunchOptions.features,
                 "-no-boot-anim",
                 "-no-snapshot",
                 "-memory", "\(settings.guestMemory)",
                 "-cores", "\(settings.guestCores)"
             ]
-            // Keep the native renderer, suppress the stock Qt window.
-            arguments.append("-qt-hide-window")
+            arguments.append(contentsOf: audio.arguments)
             arguments.append("-no-metrics")
-            if settings.disableGameAudio { arguments.append("-no-audio") }
+            arguments.append(contentsOf: AndroidEmulatorLaunchOptions.displayArguments)
             emulator.arguments = arguments
             var environment = Self.processEnvironment(paths)
             environment.merge(NativeRuntimeBundle.environment(paths: paths)) { _, value in value }
+            environment.merge(audio.environment) { _, value in value }
             environment["ANDROID_AVD_HOME"] = profileRegistry.path
             environment["MBJFW_NATIVE_SESSION"] = busName
             environment["MBJFW_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
@@ -127,22 +136,35 @@ final class AndroidEmulatorSession {
             emulator.environment = environment
             emulator.currentDirectoryURL = paths.emulator.deletingLastPathComponent()
             let logHandle = try Self.createEmulatorLog(paths.emulatorLog)
+            let invocation = ([emulator.executableURL?.lastPathComponent ?? "emulator"] + arguments)
+                .map { "'\($0.replacingOccurrences(of: "'", with: "'\\''"))'" }
+                .joined(separator: " ")
+            try logHandle.write(contentsOf: Data("\nMBJFW emulator launch: \(invocation)\n".utf8))
             emulator.standardOutput = logHandle
             emulator.standardError = logHandle
             emulator.terminationHandler = { [weak self] completed in
                 let identifier = completed.processIdentifier
-                Task { @MainActor [weak self] in self?.processDidExit(identifier) }
+                let status = completed.terminationStatus
+                Task { @MainActor [weak self] in self?.processDidExit(identifier, status: status) }
             }
+            let waitedForAnotherBoot = try await EmulatorBootGate.shared.acquire()
+            ownsColdStartGate = true
+            try Task.checkCancellation()
+            if waitedForAnotherBoot {
+                progress(.startingAndroid, "Waiting for another profile's first launch to finish…")
+            }
+            lastTerminationStatus = nil
             try emulator.run()
             process = emulator
             emulatorLogHandle = logHandle
             activeAccountID = account.id
             activeSerial = serial
             progress(.bootingAndroid, "Waiting for Android to finish starting…")
-            try await waitForBoot(serial: serial ?? "emulator-5580", paths: paths) { elapsed in
-                progress(.bootingAndroid, "Waiting for Android to finish starting… (\(elapsed)s)")
+            guard let bootSerial = serial else { throw AndroidEmulatorError.deviceNotReady }
+            try await waitForBoot(serial: bootSerial, paths: paths) { elapsed, detail in
+                progress(.bootingAndroid, "\(detail) (\(elapsed)s)")
             }
-            try await verifyGuestArchitecture(serial: serial ?? "emulator-5580", paths: paths)
+            try await verifyGuestArchitecture(serial: bootSerial, paths: paths)
         }
 
         guard let serial else { throw AndroidEmulatorError.deviceNotReady }
@@ -164,29 +186,30 @@ final class AndroidEmulatorSession {
             try await Task.sleep(for: .milliseconds(100))
         }
         guard inputReady else { throw AndroidEmulatorError.nativeDisplayUnavailable }
-        progress(.provisioningDevice, "Trimming optional Android apps for Minecraft…")
-        let disabledApps = try await AndroidAppliancePolicy.apply(serial: serial, dataDirectory: dataDirectory, paths: paths)
-        progress(.provisioningDevice, "Android appliance ready · \(disabledApps) optional apps disabled.")
-        let display = settings.guestResolution.split(separator: "x").compactMap { Int($0) }
-        if display.count == 2 {
-            // Remove a logical override left by an older build. The AVD's
-            // configured HWC mode now owns the physical guest resolution.
-            try await AndroidProcessRunner.run(adb, arguments: ["-s", serial, "shell", "wm", "size", "reset"], environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog)
-            try await AndroidProcessRunner.run(adb, arguments: ["-s", serial, "shell", "wm", "density", settings.guestDensity], environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog)
-        }
+
+        // Install Minecraft while the guest Package Manager is still in its
+        // just-booted state. Trimming optional Android packages later can restart
+        // system_server; doing that first used to leave the streamed install pipe
+        // attached to a dead Package Manager and fail an otherwise healthy profile.
         let apkHash = try Self.sha256(apk)
         let receiptURL = dataDirectory.appending(path: "installed-minecraft.json")
-        let installedPath = try? await AndroidProcessRunner.run(adb, arguments: ["-s", serial, "shell", "pm", "path", "com.mojang.minecraftpe"], environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog)
+        let installedPath = try? await AndroidProcessRunner.run(
+            adb,
+            arguments: ["-s", serial, "shell", "pm", "path", "com.mojang.minecraftpe"],
+            environment: paths.environment(javaHome: paths.javaHome),
+            logURL: paths.launchLog
+        )
         let installedHash = (try? Data(contentsOf: receiptURL)).flatMap { try? JSONDecoder().decode(InstalledGameReceipt.self, from: $0).sha256 }
         if installedHash != apkHash || installedPath?.contains("package:") != true {
-            progress(.installingGame, "Installing Minecraft  ·  \(apkHash.prefix(12))")
+            let restoredVerifier = try await AndroidAppliancePolicy.preparePackageInstaller(serial: serial, paths: paths)
+            let installDetail = restoredVerifier
+                ? "Restored Android's package verifier · installing Minecraft  ·  \(apkHash.prefix(12))"
+                : "Installing Minecraft  ·  \(apkHash.prefix(12))"
+            progress(.installingGame, installDetail)
             do {
-                try await AndroidProcessRunner.run(
-                    adb,
-                    arguments: ["-s", serial, "install", "-r", apk.path],
-                    environment: paths.environment(javaHome: paths.javaHome),
-                    logURL: paths.launchLog
-                )
+                try await AndroidAppliancePolicy.installAPK(apk, serial: serial, paths: paths) { detail in
+                    progress(.installingGame, detail)
+                }
                 let receipt = try JSONEncoder().encode(InstalledGameReceipt(sha256: apkHash, installedAt: .now))
                 try receipt.write(to: receiptURL, options: .atomic)
             } catch {
@@ -194,6 +217,17 @@ final class AndroidEmulatorSession {
             }
         } else {
             progress(.installingGame, "Minecraft is already installed; keeping its saved data.")
+        }
+
+        progress(.provisioningDevice, "Trimming optional Android apps for Minecraft…")
+        let applianceResult = try await AndroidAppliancePolicy.apply(serial: serial, dataDirectory: dataDirectory, paths: paths)
+        progress(.provisioningDevice, applianceResult.progressDetail)
+        let display = settings.guestResolution.split(separator: "x").compactMap { Int($0) }
+        if display.count == 2 {
+            // Remove a logical override left by an older build. The AVD's
+            // configured HWC mode now owns the physical guest resolution.
+            try await AndroidProcessRunner.run(adb, arguments: ["-s", serial, "shell", "wm", "size", "reset"], environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog)
+            try await AndroidProcessRunner.run(adb, arguments: ["-s", serial, "shell", "wm", "density", settings.guestDensity], environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog)
         }
         progress(.launchingGame, "Launching Bedrock…")
         try await AndroidAppliancePolicy.provisionKiosk(serial: serial, dataDirectory: dataDirectory, paths: paths)
@@ -290,18 +324,50 @@ final class AndroidEmulatorSession {
         shutdownDeadline.cancel()
     }
 
-    private func waitForBoot(serial: String, paths: AndroidSDKPaths, progress: @MainActor (Int) -> Void) async throws {
-        for elapsed in 0..<120 {
+    private func waitForBoot(serial: String, paths: AndroidSDKPaths, progress: @MainActor (Int, String) -> Void) async throws {
+        let started = ContinuousClock.now
+        while started.duration(to: .now) < .seconds(120) {
             try Task.checkCancellation()
-            guard process?.isRunning == true else { throw AndroidEmulatorError.deviceNotReady }
-            let result = try? await AndroidProcessRunner.run(
+            guard process?.isRunning == true else { throw AndroidEmulatorError.emulatorExited(lastTerminationStatus ?? process?.terminationStatus) }
+            let bootCompleted = try? await AndroidProcessRunner.run(
                 paths.adb,
                 arguments: ["-s", serial, "shell", "getprop", "sys.boot_completed"],
                 environment: paths.environment(javaHome: paths.javaHome),
-                logURL: paths.launchLog
+                logURL: paths.launchLog,
+                timeout: .seconds(5)
             )
-            if result?.trimmingCharacters(in: .whitespacesAndNewlines) == "1" { return }
-            progress(elapsed + 1)
+            guard process?.isRunning == true else { throw AndroidEmulatorError.emulatorExited(lastTerminationStatus ?? process?.terminationStatus) }
+            var activityService: String?
+            var packageService: String?
+            if bootCompleted?.trimmingCharacters(in: .whitespacesAndNewlines) == "1" {
+                activityService = try? await AndroidProcessRunner.run(
+                    paths.adb,
+                    arguments: ["-s", serial, "shell", "service", "check", "activity"],
+                    environment: paths.environment(javaHome: paths.javaHome),
+                    logURL: paths.launchLog,
+                    timeout: .seconds(5)
+                )
+                if activityService?.contains("Service activity: found") == true {
+                    packageService = try? await AndroidProcessRunner.run(
+                        paths.adb,
+                        arguments: ["-s", serial, "shell", "service", "check", "package"],
+                        environment: paths.environment(javaHome: paths.javaHome),
+                        logURL: paths.launchLog,
+                        timeout: .seconds(5)
+                    )
+                }
+                guard process?.isRunning == true else { throw AndroidEmulatorError.emulatorExited(lastTerminationStatus ?? process?.terminationStatus) }
+                if AndroidBootReadiness.isReady(
+                    bootCompleted: bootCompleted,
+                    activityService: activityService,
+                    packageService: packageService
+                ) { return }
+            }
+            let elapsed = Int(started.duration(to: .now).components.seconds) + 1
+            let detail = bootCompleted?.trimmingCharacters(in: .whitespacesAndNewlines) == "1"
+                ? "Waiting for Android system services…"
+                : "Waiting for Android to finish starting…"
+            progress(min(elapsed, 120), detail)
             try await Task.sleep(for: .seconds(1))
         }
         throw AndroidEmulatorError.bootTimedOut
@@ -345,8 +411,9 @@ final class AndroidEmulatorSession {
         return component ?? fallback
     }
 
-    private func processDidExit(_ identifier: Int32) {
+    private func processDidExit(_ identifier: Int32, status: Int32) {
         guard process?.processIdentifier == identifier else { return }
+        lastTerminationStatus = status
         process = nil
         activeAccountID = nil
         activeSerial = nil
@@ -366,24 +433,10 @@ final class AndroidEmulatorSession {
     }
 
     private func releaseReservedPort() {
-        guard let reservedPort else { return }
-        Self.leasedPorts.remove(reservedPort)
+        guard reservedPort != nil else { return }
+        portLease?.release()
+        portLease = nil
         self.reservedPort = nil
-    }
-
-    private static var leasedPorts = Set<Int>()
-
-    private static func availablePort(in devices: String) throws -> Int {
-        let usedPorts = devices.split(separator: "\n").compactMap { line -> Int? in
-            guard line.hasPrefix("emulator-") else { return nil }
-            return Int(line.dropFirst("emulator-".count).prefix(4))
-        }
-        guard let port = stride(from: 5580, through: 5680, by: 2)
-            .first(where: { !usedPorts.contains($0) && !leasedPorts.contains($0) }) else {
-            throw AndroidEmulatorError.emulatorSlotsExhausted
-        }
-        leasedPorts.insert(port)
-        return port
     }
 
     private static func processEnvironment(_ paths: AndroidSDKPaths) -> [String: String] {
@@ -413,6 +466,7 @@ final class AndroidEmulatorSession {
 
 enum AndroidEmulatorError: LocalizedError {
     case deviceNotReady
+    case emulatorExited(Int32?)
     case bootTimedOut
     case controlChannelUnavailable
     case gameLaunchTimedOut
@@ -425,6 +479,12 @@ enum AndroidEmulatorError: LocalizedError {
         switch self {
         case .deviceNotReady:
             "The Android device did not start. Try launching Bedrock again."
+        case let .emulatorExited(status):
+            if let status {
+                "The Android emulator exited during startup (status \(status)). See this profile's emulator.log for the QEMU crash details."
+            } else {
+                "The Android emulator exited during startup. See this profile's emulator.log for the QEMU crash details."
+            }
         case .bootTimedOut:
             "Android did not finish starting. Check the emulator log in \(NSHomeDirectory())/Library/Application Support/MBJFW/\(RuntimeArchitecture.current.runtimeRootDirectoryName)/emulator.log."
         case .controlChannelUnavailable:

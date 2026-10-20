@@ -25,7 +25,7 @@ Create the installer package with:
 ./scripts/build-pkg.sh
 ```
 
-The build output defaults to `dist/MBJFW-1.0.0-macos-arm64.pkg` on Apple Silicon and `dist/MBJFW-1.0.0-macos-x86_64.pkg` on Intel. Set `MBJFW_PKG_OUTPUT` to write elsewhere. To sign a distributable package, set `MBJFW_APP_SIGNING_IDENTITY` and `MBJFW_INSTALLER_SIGNING_IDENTITY`; see [Distribution](DISTRIBUTION.md) for notarization.
+The build output defaults to `dist/MBJFW-1.0.1-macos-arm64.pkg` on Apple Silicon and `dist/MBJFW-1.0.1-macos-x86_64.pkg` on Intel. Set `MBJFW_PKG_OUTPUT` to write elsewhere. To sign a distributable package, set `MBJFW_APP_SIGNING_IDENTITY` and `MBJFW_INSTALLER_SIGNING_IDENTITY`; see [Distribution](DISTRIBUTION.md) for notarization.
 
 ## Source map
 

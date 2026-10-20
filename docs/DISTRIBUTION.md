@@ -8,7 +8,7 @@ On an Apple Silicon or Intel Mac with Xcode command-line tools:
 ./scripts/build-pkg.sh
 ```
 
-This builds the native app for the current Mac, stages it under `/Applications/MBJFW.app`, and creates a host-specific package: `dist/MBJFW-1.0.0-macos-arm64.pkg` on Apple Silicon or `dist/MBJFW-1.0.0-macos-x86_64.pkg` on Intel. A matching SHA-256 file is created beside it. The package installs only the MBJFW app bundle. Android SDK downloads, profiles, APKs, saves, and logs live in the user's home directory and are not replaced or removed by an app update.
+This builds the native app for the current Mac, stages it under `/Applications/MBJFW.app`, and creates a host-specific package: `dist/MBJFW-1.0.1-macos-arm64.pkg` on Apple Silicon or `dist/MBJFW-1.0.1-macos-x86_64.pkg` on Intel. A matching SHA-256 file is created beside it. The package installs only the MBJFW app bundle. Android SDK downloads, profiles, APKs, saves, and logs live in the user's home directory and are not replaced or removed by an app update.
 
 The default build is an unsigned, local-testing installer. It is not suitable for posting as a trusted public download. Users may see a Gatekeeper warning when installing an unsigned build.
 

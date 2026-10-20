@@ -10,13 +10,22 @@ struct GameBuild: Codable, Identifiable, Equatable {
     var displayName: String { metadata.map { "Minecraft \($0.version)" } ?? originalFilename ?? id }
 }
 
+struct GameLaunchWindowRequest: Identifiable, Equatable {
+    let id: UUID
+    let accountID: UUID
+
+    init(accountID: UUID) {
+        id = UUID()
+        self.accountID = accountID
+    }
+}
+
 @MainActor
 @Observable
 final class GameLibrary {
     private(set) var builds: [GameBuild] = []
     private(set) var runtimes: [UUID: AndroidRuntimeManager] = [:]
-    private(set) var progressAccountID: UUID?
-    private(set) var progressToken = 0
+    private(set) var progressWindowRequests: [GameLaunchWindowRequest] = []
     private var isImporting = false
     private var pendingLaunches: Set<UUID> = []
     private var launchValidationTasks: [UUID: Task<Void, Never>] = [:]
@@ -202,8 +211,7 @@ final class GameLibrary {
             let directory = try accounts.emulatorDirectory(for: account)
             let apk = try apkURL(for: build.id, createParent: false)
             guard FileManager.default.fileExists(atPath: apk.path) else { throw LauncherError.apkMissing }
-            progressAccountID = account.id
-            progressToken += 1
+            progressWindowRequests.append(GameLaunchWindowRequest(accountID: account.id))
             pendingLaunches.insert(account.id)
             launchValidationTasks[account.id] = Task { @MainActor in
                 defer {

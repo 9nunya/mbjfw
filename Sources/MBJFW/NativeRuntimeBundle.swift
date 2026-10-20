@@ -47,7 +47,8 @@ enum NativeRuntimeBundle {
             "CFBundleExecutable": "NativeGameHost", "CFBundleIdentifier": "dev.mbjfw.gamehost",
             "CFBundleName": "Minecraft", "CFBundleDisplayName": "Minecraft",
             "CFBundlePackageType": "APPL", "CFBundleVersion": "1", "CFBundleShortVersionString": "1.0",
-            "LSMinimumSystemVersion": "15.0", "LSUIElement": true, "NSHighResolutionCapable": true
+            "LSMinimumSystemVersion": "15.0", "LSUIElement": true, "NSHighResolutionCapable": true,
+            "NSMicrophoneUsageDescription": "MBJFW can pass your Mac microphone into Android for games and apps in this profile."
         ]
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: contents.appending(path: "Info.plist"), options: .atomic)

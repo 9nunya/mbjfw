@@ -111,6 +111,10 @@ struct SettingsView: View {
                 Text("Audio is routed through Android to your Mac output.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+                Toggle("Mac microphone", isOn: setting(\.hostMicrophoneEnabled))
+                Text("When enabled, macOS asks for microphone access and routes input to Android. This setting applies the next time this profile starts.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Runtime") {

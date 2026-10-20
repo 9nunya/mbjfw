@@ -72,6 +72,11 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")" = "$GITHUB_RUN_NUMBER"
           test -s "$PKG"
           test -s "$PKG.sha256"
+          PACKAGE_ROOT="$RUNNER_TEMP/mbjfw-package-inspection"
+          pkgutil --expand-full "$PKG" "$PACKAGE_ROOT"
+          grep -q 'install-location="/"' "$PACKAGE_ROOT/PackageInfo"
+          grep -q '<bundle-version/>' "$PACKAGE_ROOT/PackageInfo"
+          test -f "$PACKAGE_ROOT/Payload/Applications/MBJFW.app/Contents/Info.plist"
           codesign --verify --deep --strict "$APP"
           (cd dist && shasum -a 256 -c "$(basename "$PKG").sha256")
 

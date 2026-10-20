@@ -22,7 +22,7 @@ enum AndroidAppliancePolicy {
         "com.google.android.as", "com.google.android.as.oss", "com.android.vending"
     ]
 
-    static func apply(serial: String, dataDirectory: URL, paths: AndroidSDKPaths) async throws -> Int {
+    static func apply(serial: String, dataDirectory: URL, paths: AndroidSDKPaths) async throws -> AndroidApplianceResult {
         try await configureDesktopSession(serial: serial, paths: paths)
         try await removePhoneDisplayDecorations(serial: serial, paths: paths)
         let manifestURL = dataDirectory.appending(path: "android-app-policy.json")
@@ -35,9 +35,20 @@ enum AndroidAppliancePolicy {
         let disabledText = try await command(paths, serial, ["shell", "pm", "list", "packages", "-d", "--user", "0"])
         let alreadyDisabled = Set(disabledText.split(whereSeparator: \.isNewline).compactMap { $0.split(separator: ":").last.map(String.init) })
         var changed = previous?.disabledPackages ?? []
-        for package in optionalPackages.sorted() where installed.contains(package) && !alreadyDisabled.contains(package) {
-            let result = try await command(paths, serial, ["shell", "pm", "disable-user", "--user", "0", package])
-            if result.contains("disabled-user") { changed.append(package) }
+        var skipped: [String] = []
+        let pendingPackages = optionalPackages.sorted().filter { installed.contains($0) && !alreadyDisabled.contains($0) }
+        for (index, package) in pendingPackages.enumerated() {
+            do {
+                let result = try await disableOptionalPackage(package, serial: serial, paths: paths)
+                if result.contains("disabled-user") { changed.append(package) }
+            } catch {
+                skipped.append(package)
+                // These packages are optional. A failed disable means Android
+                // is not in a reliable state for more Package Manager calls;
+                // leave the rest enabled and let the game continue provisioning.
+                skipped.append(contentsOf: pendingPackages.dropFirst(index + 1))
+                break
+            }
         }
         let priorPolicy: String
         if let savedPolicy = previous?.previousPolicyControl {
@@ -48,7 +59,10 @@ enum AndroidAppliancePolicy {
         try await setImmersiveMode(serial: serial, paths: paths)
         let manifest = PolicyManifest(version: 3, fingerprint: fingerprint, disabledPackages: Array(Set(changed)).sorted(), previousPolicyControl: priorPolicy == "null" ? nil : priorPolicy)
         try JSONEncoder().encode(manifest).write(to: manifestURL, options: .atomic)
-        return changed.count + alreadyDisabled.intersection(optionalPackages).count
+        return AndroidApplianceResult(
+            disabledPackages: changed.count + alreadyDisabled.intersection(optionalPackages).count,
+            skippedPackages: skipped
+        )
     }
 
     static func restore(serial: String, dataDirectory: URL, paths: AndroidSDKPaths) async throws -> Int {
@@ -72,6 +86,7 @@ enum AndroidAppliancePolicy {
     }
 
     static func provisionKiosk(serial: String, dataDirectory: URL, paths: AndroidSDKPaths) async throws {
+        try await waitForPackageService(serial: serial, paths: paths)
         guard let apk = PackagedResourceLocator.url(forResource: "appliance", withExtension: "apk") else {
             throw AndroidEmulatorError.nativeDisplayUnavailable
         }
@@ -79,7 +94,7 @@ enum AndroidAppliancePolicy {
         let receipt = dataDirectory.appending(path: "appliance-version.txt")
         let installed = (try? await command(paths, serial, ["shell", "pm", "path", "dev.mbjfw.appliance"])) ?? ""
         if (try? String(contentsOf: receipt, encoding: .utf8)) != digest || !installed.contains("package:") {
-            _ = try await command(paths, serial, ["install", "-r", "-t", apk.path])
+            _ = try await installAPK(apk, serial: serial, paths: paths, testOnly: true) { _ in }
             try digest.write(to: receipt, atomically: true, encoding: .utf8)
         }
         var owners = try await command(paths, serial, ["shell", "dpm", "list-owners"])
@@ -101,6 +116,19 @@ enum AndroidAppliancePolicy {
                 _ = try await command(paths, serial, ["shell", "pm", "disable-user", "--user", "0", package])
             }
         }
+    }
+
+    /// Older appliance policies disabled Play Store along with ordinary apps.
+    /// Android's package-verification path can depend on the verifier being
+    /// enabled while a sideload is being committed, so restore it before any
+    /// Minecraft install or update. `apply` can trim it again after success.
+    static func preparePackageInstaller(serial: String, paths: AndroidSDKPaths) async throws -> Bool {
+        try await waitForPackageService(serial: serial, paths: paths, stableFor: .seconds(2))
+        let disabled = try await command(paths, serial, ["shell", "pm", "list", "packages", "-d", "--user", "0"])
+        guard disabledPackageNames(in: disabled).contains("com.android.vending") else { return false }
+        _ = try await command(paths, serial, ["shell", "pm", "enable", "--user", "0", "com.android.vending"])
+        try await waitForPackageService(serial: serial, paths: paths, stableFor: .seconds(2))
+        return true
     }
 
     private static func setImmersiveMode(serial: String, paths: AndroidSDKPaths) async throws {
@@ -149,8 +177,145 @@ enum AndroidAppliancePolicy {
         }
     }
 
-    private static func command(_ paths: AndroidSDKPaths, _ serial: String, _ arguments: [String]) async throws -> String {
-        try await AndroidProcessRunner.run(paths.adb, arguments: ["-s", serial] + arguments, environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog)
+    private static func command(_ paths: AndroidSDKPaths, _ serial: String, _ arguments: [String], timeout: Duration? = nil) async throws -> String {
+        try await AndroidProcessRunner.run(paths.adb, arguments: ["-s", serial] + arguments, environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog, timeout: timeout)
+    }
+
+    private static func disableOptionalPackage(_ package: String, serial: String, paths: AndroidSDKPaths) async throws -> String {
+        for attempt in 0..<3 {
+            do {
+                return try await command(paths, serial, ["shell", "pm", "disable-user", "--user", "0", package])
+            } catch {
+                guard isTransientPackageServiceFailure(error), attempt < 2 else { throw error }
+                try await waitForPackageService(serial: serial, paths: paths)
+                try await Task.sleep(for: .milliseconds(400 * (attempt + 1)))
+            }
+        }
+        throw AndroidCommandError(command: "pm disable-user \(package)", status: -1, output: "Package Manager did not recover.")
+    }
+
+    private static func waitForPackageService(
+        serial: String,
+        paths: AndroidSDKPaths,
+        stableFor: Duration = .seconds(3)
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(25))
+        var healthySince: ContinuousClock.Instant?
+        var lastFailure = "Package Manager service is unavailable."
+        while ContinuousClock.now < deadline {
+            try Task.checkCancellation()
+            do {
+                let status = try await command(paths, serial, ["shell", "service", "check", "package"], timeout: .seconds(3))
+                guard status.contains("Service package: found") else {
+                    healthySince = nil
+                    try await Task.sleep(for: .milliseconds(350))
+                    continue
+                }
+                // `service check` only proves that the binder name exists. Keep
+                // probing a real Package Manager transaction until it has stayed
+                // healthy; two quick checks raced system_server restarts during APK
+                // installation on profiles created by earlier builds.
+                let probe = try await command(paths, serial, ["shell", "pm", "path", "android"], timeout: .seconds(4))
+                if probe.contains("package:") {
+                    if healthySince == nil { healthySince = .now }
+                    if let healthySince, healthySince.duration(to: .now) >= stableFor { return }
+                } else {
+                    healthySince = nil
+                    lastFailure = "Package Manager did not return the framework package path."
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                healthySince = nil
+                lastFailure = error.localizedDescription
+            }
+            try await Task.sleep(for: .milliseconds(350))
+        }
+        throw AndroidCommandError(
+            command: "wait for Android Package Manager",
+            status: -1,
+            output: "Package Manager did not recover within 25 seconds. Last check: \(lastFailure)"
+        )
+    }
+
+    @discardableResult
+    static func installAPK(
+        _ apk: URL,
+        serial: String,
+        paths: AndroidSDKPaths,
+        testOnly: Bool = false,
+        progress: @MainActor (String) -> Void
+    ) async throws -> String {
+        var lastError: Error?
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                progress("Android Package Manager restarted; waiting for a stable recovery before retry \(attempt + 1)/3…")
+                try await waitForPackageService(serial: serial, paths: paths, stableFor: .seconds(8))
+            }
+
+            let arguments = installArguments(apkPath: apk.path, attempt: attempt, testOnly: testOnly)
+            do {
+                return try await command(paths, serial, arguments)
+            } catch {
+                await captureInstallDiagnostics(serial: serial, paths: paths)
+                guard isTransientPackageServiceFailure(error), attempt < 2 else { throw error }
+                lastError = error
+            }
+        }
+        throw lastError ?? AndroidCommandError(
+            command: "install \(apk.lastPathComponent)",
+            status: -1,
+            output: "Android Package Manager stopped responding during APK installation."
+        )
+    }
+
+    static func installArguments(apkPath: String, attempt: Int, testOnly: Bool) -> [String] {
+        var arguments = ["install", "-r"]
+        if testOnly { arguments.append("-t") }
+        // ADB's streamed install keeps the APK transfer and Package Manager
+        // session coupled. After a Package Manager disconnect, push the file
+        // first and invoke Package Manager as a separate operation.
+        if attempt > 0 { arguments.append("--no-streaming") }
+        arguments.append(apkPath)
+        return arguments
+    }
+
+    static func isTransientPackageServiceFailure(_ error: Error) -> Bool {
+        guard let commandError = error as? AndroidCommandError else { return false }
+        let details = "\(commandError.command)\n\(commandError.output)".lowercased()
+        return details.contains("failure calling service package: broken pipe") ||
+            details.contains("failure calling service package: dead object") ||
+            details.contains("can't find service: package")
+    }
+
+    static func disabledPackageNames(in output: String) -> Set<String> {
+        Set(output.split(whereSeparator: \.isNewline).compactMap { line in
+            guard line.hasPrefix("package:") else { return nil }
+            return String(line.dropFirst("package:".count))
+        })
+    }
+
+    private static func captureInstallDiagnostics(serial: String, paths: AndroidSDKPaths) async {
+        // logcat's crash buffer survives system_server restarts and is the best
+        // source for the Java exception behind a broken Package Manager binder.
+        _ = try? await command(paths, serial, ["logcat", "-b", "crash", "-d", "-v", "brief", "-t", "200"])
+        _ = try? await command(paths, serial, ["logcat", "-b", "events", "-d", "-v", "brief", "-t", "300"])
+        _ = try? await command(paths, serial, ["shell", "df", "-h", "/data"], timeout: .seconds(4))
+        _ = try? await command(paths, serial, ["shell", "cat", "/proc/meminfo"], timeout: .seconds(4))
+    }
+}
+
+struct AndroidApplianceResult: Equatable {
+    let disabledPackages: Int
+    let skippedPackages: [String]
+
+    var progressDetail: String {
+        guard !skippedPackages.isEmpty else {
+            return "Android appliance ready · \(disabledPackages) optional apps disabled."
+        }
+        let examples = skippedPackages.prefix(3).joined(separator: ", ")
+        let remainder = skippedPackages.count > 3 ? " and \(skippedPackages.count - 3) more" : ""
+        return "Android appliance ready · \(disabledPackages) optional apps disabled. Some optional apps remain enabled: \(examples)\(remainder)."
     }
 }
 

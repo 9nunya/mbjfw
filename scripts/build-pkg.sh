@@ -39,10 +39,23 @@ fi
 STAGED_APP="$WORK/MBJFW.app"
 /usr/bin/ditto --norsrc --noextattr --noqtn "$APP" "$STAGED_APP"
 /usr/bin/codesign --verify --deep --strict "$STAGED_APP"
-set -- --component "$STAGED_APP" \
+
+# Put the app in a root-based payload and disable Installer's bundle relocation
+# and version checks. Component-mode packaging can follow a matching bundle
+# into a developer checkout, and its default version check skips older builds.
+STAGING_ROOT="$WORK/root"
+COMPONENTS="$WORK/components.plist"
+/bin/mkdir -p "$STAGING_ROOT/Applications"
+/usr/bin/ditto --norsrc --noextattr --noqtn "$STAGED_APP" "$STAGING_ROOT/Applications/MBJFW.app"
+/usr/bin/pkgbuild --analyze --root "$STAGING_ROOT" "$COMPONENTS"
+/usr/libexec/PlistBuddy -c 'Add :0:BundleIsRelocatable bool false' "$COMPONENTS"
+/usr/libexec/PlistBuddy -c 'Set :0:BundleIsVersionChecked false' "$COMPONENTS"
+/usr/libexec/PlistBuddy -c 'Set :0:BundleOverwriteAction upgrade' "$COMPONENTS"
+set -- --root "$STAGING_ROOT" \
+    --component-plist "$COMPONENTS" \
     --identifier dev.mbjfw.launcher.pkg \
     --version "$VERSION" \
-    --install-location /Applications
+    --install-location /
 if [ -n "${MBJFW_INSTALLER_SIGNING_IDENTITY:-}" ]; then
     set -- "$@" --sign "$MBJFW_INSTALLER_SIGNING_IDENTITY"
 fi
