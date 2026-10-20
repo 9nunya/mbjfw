@@ -1,0 +1,48 @@
+name: macOS CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Test and package app (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Verify runner and toolchain
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          sw_vers
+          swift --version
+          xcodebuild -version
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build app bundle with icon
+        run: MBJFW_NO_OPEN=1 ./scripts/package-app.sh --no-open
+
+      - name: Verify app bundle
+        run: |
+          set -euo pipefail
+          APP="dist/MBJFW.app"
+          test -s "$APP/Contents/MacOS/MBJFW"
+          test -s "$APP/Contents/Resources/AppIcon.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist")" = "AppIcon"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "Minecraft Bedrock Just Fucking Works"
+          codesign --verify --deep --strict "$APP"

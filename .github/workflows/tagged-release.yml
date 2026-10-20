@@ -1,0 +1,94 @@
+name: Tagged macOS release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tagged-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    name: Build v1 release assets (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v7
+
+      - name: Validate release tag and architecture
+        id: release
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AppInfo.plist)
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "Tag $GITHUB_REF_NAME must match AppInfo.plist version v$VERSION." >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "MBJFW_BUILD_NUMBER=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          swift --version
+          xcodebuild -version
+
+      - name: Run release tests
+        run: swift test
+
+      - name: Build app and installer package
+        run: ./scripts/build-pkg.sh
+
+      - name: Verify bundle, package, and icon
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          APP="dist/MBJFW.app"
+          PKG="dist/MBJFW-$VERSION-macos-arm64.pkg"
+          test -s "$APP/Contents/Resources/AppIcon.icns"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")" = "$GITHUB_RUN_NUMBER"
+          test -s "$PKG"
+          test -s "$PKG.sha256"
+          codesign --verify --deep --strict "$APP"
+          (cd dist && shasum -a 256 -c "$(basename "$PKG").sha256")
+
+      - name: Archive app and create release checksums
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          APP_ZIP="MBJFW-$VERSION-macos-arm64.app.zip"
+          /usr/bin/ditto -c -k --keepParent dist/MBJFW.app "dist/$APP_ZIP"
+          (cd dist && shasum -a 256 "$APP_ZIP" "MBJFW-$VERSION-macos-arm64.pkg" > SHA256SUMS)
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+
+      - name: Create or refresh draft GitHub release
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --verify-tag \
+              --title "Minecraft Bedrock Just Fucking Works $VERSION" \
+              --generate-notes \
+              --notes "Build artifacts are ad-hoc signed and the installer is unsigned and not notarized. Keep this release in draft until Developer ID signing and notarization have been completed."
+          fi
+          gh release upload "$TAG" \
+            "dist/MBJFW-$VERSION-macos-arm64.app.zip" \
+            "dist/MBJFW-$VERSION-macos-arm64.pkg" \
+            "dist/MBJFW-$VERSION-macos-arm64.pkg.sha256" \
+            dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
