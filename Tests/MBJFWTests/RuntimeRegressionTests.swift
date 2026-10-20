@@ -3,6 +3,53 @@ import XCTest
 import MBJFWFrameBridge
 
 final class RuntimeRegressionTests: XCTestCase {
+    func testReleaseVersionComparisonIsNumericAndToleratesTagPrefix() {
+        XCTAssertTrue(ReleaseVersion.isNewer("v1.10.0", than: "1.9.9"))
+        XCTAssertTrue(ReleaseVersion.isNewer("1.0.1", than: "1.0"))
+        XCTAssertFalse(ReleaseVersion.isNewer("1.0.0", than: "1.0"))
+        XCTAssertFalse(ReleaseVersion.isNewer("nightly", than: "1.0.0"))
+    }
+
+    func testRuntimeArchitectureSelectsMatchingMacAndAndroidArtifacts() throws {
+        let appleSilicon = RuntimeArchitecture.arm64
+        XCTAssertEqual(appleSilicon.androidABI, "arm64-v8a")
+        XCTAssertEqual(appleSilicon.systemImage, "system-images;android-35;google_apis;arm64-v8a")
+        XCTAssertEqual(appleSilicon.qemuHostDirectory, "darwin-aarch64")
+        XCTAssertEqual(appleSilicon.qemuGuestExecutable, "qemu-system-aarch64")
+        XCTAssertEqual(appleSilicon.hidResourceName, "mbjfw-hid-arm64")
+        XCTAssertEqual(appleSilicon.emulatorArchiveURL, "https://dl.google.com/android/repository/emulator-darwin_aarch64-16428233.zip")
+        XCTAssertEqual(appleSilicon.runtimeRootDirectoryName, "android-runtime")
+
+        let intel = RuntimeArchitecture.x86_64
+        XCTAssertEqual(intel.androidABI, "x86_64")
+        XCTAssertEqual(intel.systemImage, "system-images;android-35;google_apis;x86_64")
+        XCTAssertEqual(intel.systemImageArchiveURL, "https://dl.google.com/android/repository/sys-img/google_apis/x86_64-35_r09.zip")
+        XCTAssertEqual(intel.qemuHostDirectory, "darwin-x86_64")
+        XCTAssertEqual(intel.qemuGuestExecutable, "qemu-system-x86_64")
+        XCTAssertEqual(intel.hidResourceName, "mbjfw-hid-x86_64")
+        XCTAssertEqual(intel.emulatorArchiveURL, "https://dl.google.com/android/repository/emulator-darwin_x64-16428233.zip")
+        XCTAssertEqual(intel.runtimeRootDirectoryName, "android-runtime-x86_64")
+        XCTAssertTrue(intel.javaRuntimeURL.contains("/mac/x64/"))
+        XCTAssertTrue(intel.commandToolsURL.contains("mac_x86_64"))
+        let root = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let flatBundle = root.appending(path: PackagedResourceLocator.resourceBundleName)
+        try FileManager.default.createDirectory(at: flatBundle, withIntermediateDirectories: true)
+        let flatFile = flatBundle.appending(path: "mbjfw-hid-x86_64")
+        try Data("helper".utf8).write(to: flatFile)
+        XCTAssertEqual(PackagedResourceLocator.url(named: "mbjfw-hid-x86_64", inResourceDirectory: root), flatFile)
+
+        let nested = root.appending(path: PackagedResourceLocator.resourceBundleName).appending(path: "Contents/Resources")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        let nestedFile = nested.appending(path: "appliance.apk")
+        try Data("apk".utf8).write(to: nestedFile)
+        XCTAssertEqual(PackagedResourceLocator.url(named: "appliance.apk", inResourceDirectory: root), nestedFile)
+
+        let paths = AndroidSDKPaths(root: URL(fileURLWithPath: "/tmp/mbjfw-intel"), architecture: .x86_64)
+        XCTAssertTrue(paths.systemImageDirectory.path.hasSuffix("system-images/android-35/google_apis/x86_64"))
+        XCTAssertEqual(paths.systemImageArchive.lastPathComponent, "android-35-google-apis-x86_64.zip")
+    }
+
     func testDownloadProgressExplainsBytesRateAndRemainingTime() throws {
         let value = try XCTUnwrap(DownloadProgress.curl("34 1695M 34 578M 0 0 12.4M 0 0:02:16 0:00:46 0:01:30 12.4M"))
         XCTAssertEqual(value.fraction, 0.34, accuracy: 0.001)

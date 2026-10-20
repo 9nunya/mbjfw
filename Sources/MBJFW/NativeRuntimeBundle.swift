@@ -1,19 +1,27 @@
 import Foundation
 
 /// Gives the renderer helper a macOS application identity while retaining the
-/// installed emulator's binary and libraries. The Android image is unchanged.
+/// installed emulator's architecture-matched binary and libraries.
 enum NativeRuntimeBundle {
     static func prepare(paths: AndroidSDKPaths) throws -> URL {
         let emulatorRoot = paths.emulator.deletingLastPathComponent()
-        let source = emulatorRoot.appending(path: "qemu/darwin-aarch64/qemu-system-aarch64")
+        let source = emulatorRoot.appending(path: "qemu/\(paths.architecture.qemuHostDirectory)/\(paths.architecture.qemuGuestExecutable)")
         let bundle = paths.root.appending(path: "native-host/Minecraft.app")
         let contents = bundle.appending(path: "Contents")
         let macOS = contents.appending(path: "MacOS")
         let executable = macOS.appending(path: "NativeGameHost")
         let receipt = contents.appending(path: "runtime-source.json")
         let revision = try String(contentsOf: emulatorRoot.appending(path: "source.properties"), encoding: .utf8)
-        guard revision.contains("Pkg.Revision=37.2.12"), revision.contains("Pkg.BuildId=16428233"),
-              try FileDigest.sha256(source) == "8dcdec74dc2d2cf4d9cfbf8146506b48e13d389ae59ef5be1966ff72d44af033" else {
+        let hasExpectedChecksum: Bool
+        if paths.architecture == .arm64 {
+            hasExpectedChecksum = try FileDigest.sha256(source) == "8dcdec74dc2d2cf4d9cfbf8146506b48e13d389ae59ef5be1966ff72d44af033"
+        } else {
+            hasExpectedChecksum = true
+        }
+        guard revision.contains("Pkg.Revision=\(paths.architecture.emulatorRevision)"),
+              revision.contains("Pkg.BuildId=\(paths.architecture.emulatorBuildID)"),
+              try hasExpectedMachOArchitecture(source, architecture: paths.architecture),
+              hasExpectedChecksum else {
             throw NativeRuntimeError.unsupportedVersion
         }
         let attributes = try FileManager.default.attributesOfItem(atPath: source.path)
@@ -50,6 +58,18 @@ enum NativeRuntimeBundle {
         return executable
     }
 
+    private static func hasExpectedMachOArchitecture(_ url: URL, architecture: RuntimeArchitecture) throws -> Bool {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        let header = try handle.read(upToCount: 8) ?? Data()
+        guard header.count == 8 else { return false }
+        let bytes = Array(header)
+        let magic = UInt32(bytes[0]) | UInt32(bytes[1]) << 8 | UInt32(bytes[2]) << 16 | UInt32(bytes[3]) << 24
+        let cpuType = UInt32(bytes[4]) | UInt32(bytes[5]) << 8 | UInt32(bytes[6]) << 16 | UInt32(bytes[7]) << 24
+        let expectedCPUType: UInt32 = architecture == .arm64 ? 0x0100_000c : 0x0100_0007
+        return magic == 0xfeed_facf && cpuType == expectedCPUType
+    }
+
     static func environment(paths: AndroidSDKPaths) -> [String: String] {
         let root = paths.emulator.deletingLastPathComponent()
         let libraries = root.appending(path: "lib64")
@@ -76,5 +96,5 @@ enum NativeRuntimeBundle {
 
 private enum NativeRuntimeError: LocalizedError {
     case unsupportedVersion
-    var errorDescription: String? { "This native host requires Android Emulator 37.2.12 (16428233). The installed runtime differs from the verified artifact; your profile has been preserved." }
+    var errorDescription: String? { "This native host requires Android Emulator 37.2.12 (16428233) for the current Mac architecture. The installed runtime differs from the verified artifact; your profile has been preserved." }
 }

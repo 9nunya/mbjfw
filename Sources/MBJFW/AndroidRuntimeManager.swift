@@ -20,7 +20,7 @@ final class AndroidRuntimeManager {
     var statusMessage = "Android runtime installs the first time you play."
 
     private let runtimeRoot = URL(fileURLWithPath: NSHomeDirectory())
-        .appending(path: "Library/Application Support/MBJFW/android-runtime")
+        .appending(path: "Library/Application Support/MBJFW/\(RuntimeArchitecture.current.runtimeRootDirectoryName)")
     private(set) var paths: AndroidSDKPaths
     private let session = AndroidEmulatorSession()
     private var pendingLaunch: PendingAndroidLaunch?

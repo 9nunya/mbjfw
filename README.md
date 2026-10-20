@@ -5,7 +5,7 @@
   </tr>
 </table>
 
-A native macOS launcher and account manager for Minecraft Bedrock. It downloads and manages an ARM64 Android Emulator itself, runs it with the Mac GPU, sideloads your APK, and starts Bedrock directly. You do not need Android Studio, a JDK, the upstream launcher UI, or a Google Play purchase for the game, if you already fucking own it.
+A native macOS launcher and account manager for Minecraft Bedrock. It downloads and manages an Android Emulator matched to your Mac—ARM64 on Apple Silicon and x86_64 on Intel—runs it with the Mac GPU, sideloads your ARM64 APK, and starts Bedrock directly. Intel Macs use Android's ARM app translation support. You do not need Android Studio, a JDK, the upstream launcher UI, or a Google Play purchase for the game, if you already fucking own it.
 
 Works with Minecraft Bedrock APK builds compatible with the bundled Android runtime; there are no per-version game hooks to keep chasing. Just drop a compatible APK here bro, I know you know how to get it.
 
@@ -17,7 +17,7 @@ And linux users, you guys have MCPE launcher. You wanna skimp out on buying the 
 
 ## Build and run
 
-Requirements: macOS 15 or newer and Xcode command-line tools to build from source. First-run setup downloads Java, Android command-line tools, the emulator, and an ARM64 Android image (several GB). MBJFW shows the Android SDK license and asks the user to accept before installing.
+Requirements: macOS 15 or newer and Xcode command-line tools to build from source. First-run setup downloads Java, Android command-line tools, the emulator, and a host-matched Android image (several GB). MBJFW shows the Android SDK license and asks the user to accept before installing.
 
 1. Build and open MBJFW:
 
@@ -28,7 +28,7 @@ Requirements: macOS 15 or newer and Xcode command-line tools to build from sourc
 2. Add your APK, select **Play now**, then accept the Android SDK terms in MBJFW. It downloads and sets up the runtime automatically.
 3. Sign in to Microsoft/Xbox inside Bedrock. Add more MBJFW account profiles to keep each profile's Android data, sign-in, worlds, and settings separate.
 
-Build the local installer with `./scripts/build-pkg.sh`. Pushing a version tag such as `v1.0.0` runs the macOS ARM64 release workflow, which builds the app and installer and attaches them with checksums to a draft GitHub release. See [Distribution and signing](docs/DISTRIBUTION.md).
+Build the local installer with `./scripts/build-pkg.sh`. Pushing a version tag such as `v1.0.0` runs release builds on Apple Silicon and Intel, then attaches both app archives and installers with checksums to a draft GitHub release. See [Distribution and signing](docs/DISTRIBUTION.md).
 
 APKs are copied locally into `~/Library/Application Support/MBJFW/apks/` and installed with `adb`. MBJFW does not contact Google Play, launch the Play Store, or apply an ownership/purchase check. It accepts one APK per import; split APK sets are not merged yet.
 
@@ -36,13 +36,14 @@ APKs are copied locally into `~/Library/Application Support/MBJFW/apks/` and ins
 
 - Native SwiftUI Mac launcher, version library, and one-click play.
 - Local APK import with no Play Store download flow.
+- Checks GitHub for a newer published release on launch and asks before downloading the host-specific installer.
 - Multiple local account profiles with isolated Microsoft sign-ins, worlds, and settings. Authentication happens in-game; MBJFW never collects Microsoft passwords or tokens.
-- ARM64 Android virtual device accelerated by the Mac GPU (`-gpu host`, which can use MoltenVK on macOS).
+- Host-matched Android virtual device accelerated by the Mac GPU (`-gpu host`, which can use MoltenVK on macOS); Intel guests translate the ARM64 Minecraft app.
 - No Play Store image and no Google account sign-in required by MBJFW.
 
 ## Compatibility
 
-MBJFW uses an Android 15 Google APIs ARM64 system image without the Play Store. Compatibility still depends on the APK's ABI, Android version requirements, Minecraft's own sign-in/license behavior, and emulator graphics support.
+MBJFW uses an Android 15 Google APIs image without the Play Store: ARM64 on Apple Silicon and x86_64 with ARM64 app translation on Intel Macs. Compatibility still depends on Android's translation support, the APK's ABI and Android version requirements, Minecraft's own sign-in/license behavior, and emulator graphics support. Intel gameplay performance depends on the translated guest workload and has not been measured against Apple Silicon.
 
 ## Development
 

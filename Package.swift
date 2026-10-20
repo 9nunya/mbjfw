@@ -10,7 +10,7 @@ let package = Package(
     ],
     dependencies: [],
     targets: [
-        .executableTarget(name: "MBJFW", dependencies: ["CSQLite", "MBJFWFrameBridge"], path: "Sources/MBJFW", resources: [.copy("Resources/mbjfw-hid"), .copy("Resources/appliance.apk")]),
+        .executableTarget(name: "MBJFW", dependencies: ["CSQLite", "MBJFWFrameBridge"], path: "Sources/MBJFW", resources: [.copy("Resources/mbjfw-hid-arm64"), .copy("Resources/mbjfw-hid-x86_64"), .copy("Resources/appliance.apk")]),
         .target(
             name: "MBJFWFrameBridge",
             path: "NativeGameHost/FrameBridge",

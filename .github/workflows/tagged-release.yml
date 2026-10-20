@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: tagged-release-${{ github.ref }}
@@ -14,11 +14,17 @@ concurrency:
 
 jobs:
   build-release:
-    name: Build v1 release assets (Apple Silicon)
-    runs-on: macos-15
+    name: Build v1 release assets (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
-    env:
-      GH_TOKEN: ${{ github.token }}
 
     steps:
       - name: Check out tagged source
@@ -26,9 +32,11 @@ jobs:
 
       - name: Validate release tag and architecture
         id: release
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "arm64"
+          test "$(uname -m)" = "$EXPECTED_ARCH"
           VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' AppInfo.plist)
           if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
             echo "Tag $GITHUB_REF_NAME must match AppInfo.plist version v$VERSION." >&2
@@ -48,11 +56,18 @@ jobs:
       - name: Verify bundle, package, and icon
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          ARCH: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
           APP="dist/MBJFW.app"
-          PKG="dist/MBJFW-$VERSION-macos-arm64.pkg"
+          PKG="dist/MBJFW-$VERSION-macos-$ARCH.pkg"
           test -s "$APP/Contents/Resources/AppIcon.icns"
+          BUNDLE="$APP/Contents/Resources/MBJFW_MBJFW.bundle"
+          test -s "$BUNDLE/Contents/Info.plist"
+          test -s "$BUNDLE/Contents/Resources/appliance.apk"
+          test -x "$BUNDLE/Contents/Resources/mbjfw-hid-arm64"
+          test -x "$BUNDLE/Contents/Resources/mbjfw-hid-x86_64"
+          test "$(lipo -archs "$APP/Contents/MacOS/MBJFW")" = "$ARCH"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")" = "$VERSION"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")" = "$GITHUB_RUN_NUMBER"
           test -s "$PKG"
@@ -60,22 +75,58 @@ jobs:
           codesign --verify --deep --strict "$APP"
           (cd dist && shasum -a 256 -c "$(basename "$PKG").sha256")
 
-      - name: Archive app and create release checksums
+      - name: Archive app
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          ARCH: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
-          APP_ZIP="MBJFW-$VERSION-macos-arm64.app.zip"
+          APP_ZIP="MBJFW-$VERSION-macos-$ARCH.app.zip"
           /usr/bin/ditto -c -k --keepParent dist/MBJFW.app "dist/$APP_ZIP"
-          (cd dist && shasum -a 256 "$APP_ZIP" "MBJFW-$VERSION-macos-arm64.pkg" > SHA256SUMS)
+          test -s "dist/$APP_ZIP"
+
+      - name: Upload architecture assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.architecture }}
+          if-no-files-found: error
+          path: |
+            dist/MBJFW-${{ steps.release.outputs.version }}-macos-${{ matrix.architecture }}.app.zip
+            dist/MBJFW-${{ steps.release.outputs.version }}-macos-${{ matrix.architecture }}.pkg
+            dist/MBJFW-${{ steps.release.outputs.version }}-macos-${{ matrix.architecture }}.pkg.sha256
+
+  publish-draft:
+    name: Refresh tagged draft release
+    needs: build-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download architecture assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify and checksum combined assets
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          test -s "dist/MBJFW-$VERSION-macos-arm64.app.zip"
+          test -s "dist/MBJFW-$VERSION-macos-arm64.pkg"
+          test -s "dist/MBJFW-$VERSION-macos-x86_64.app.zip"
+          test -s "dist/MBJFW-$VERSION-macos-x86_64.pkg"
+          (cd dist && shasum -a 256 "MBJFW-$VERSION-macos-arm64.app.zip" "MBJFW-$VERSION-macos-arm64.pkg" "MBJFW-$VERSION-macos-x86_64.app.zip" "MBJFW-$VERSION-macos-x86_64.pkg" > SHA256SUMS)
           (cd dist && shasum -a 256 -c SHA256SUMS)
 
       - name: Create or refresh draft GitHub release
         env:
-          VERSION: ${{ steps.release.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
@@ -83,12 +134,15 @@ jobs:
               --verify-tag \
               --title "Minecraft Bedrock Just Fucking Works $VERSION" \
               --generate-notes \
-              --notes "Build artifacts are ad-hoc signed and the installer is unsigned and not notarized. Keep this release in draft until Developer ID signing and notarization have been completed."
+              --notes "Build artifacts are ad-hoc signed and the installers are unsigned and not notarized. Keep this release in draft until Developer ID signing and notarization have been completed."
           fi
           gh release upload "$TAG" \
             "dist/MBJFW-$VERSION-macos-arm64.app.zip" \
             "dist/MBJFW-$VERSION-macos-arm64.pkg" \
             "dist/MBJFW-$VERSION-macos-arm64.pkg.sha256" \
+            "dist/MBJFW-$VERSION-macos-x86_64.app.zip" \
+            "dist/MBJFW-$VERSION-macos-x86_64.pkg" \
+            "dist/MBJFW-$VERSION-macos-x86_64.pkg.sha256" \
             dist/SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --clobber

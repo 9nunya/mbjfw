@@ -3,11 +3,18 @@ import SwiftUI
 struct SDKConsentView: View {
     @Environment(GameLibrary.self) private var library
 
+    private var androidImageDescription: String {
+        switch RuntimeArchitecture.current {
+        case .arm64: "an ARM64 Android system image"
+        case .x86_64: "an Intel x86_64 Android system image with ARM64 app support"
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Install Android Runtime")
                 .font(.title2.weight(.semibold))
-            Text("MBJFW needs a Java runtime, Android Emulator, and an ARM64 Android system image to run this Bedrock APK. Minecraft is installed directly; Google Play and a Google account are not used.")
+            Text("MBJFW needs a Java runtime, Android Emulator, and \(androidImageDescription) to run this Bedrock APK. Minecraft is installed directly; Google Play and a Google account are not used.")
             Text("This downloads several gigabytes and accepts the Android SDK package licenses for this Mac. Your APK and profile data remain local.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)

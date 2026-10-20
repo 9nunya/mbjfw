@@ -1,8 +1,22 @@
 #!/bin/sh
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-SDK=${ANDROID_SDK_ROOT:-"$HOME/Library/Application Support/MBJFW/android-runtime/android-sdk"}
-JAVA=${JAVA_HOME:-"$HOME/Library/Application Support/MBJFW/android-runtime/jre/jdk-21.0.12.1+1-jre/Contents/Home"}
+case "$(uname -m)" in
+    arm64) DEFAULT_RUNTIME=android-runtime ;;
+    x86_64) DEFAULT_RUNTIME=android-runtime-x86_64 ;;
+    *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 2 ;;
+esac
+RUNTIME=${MBJFW_RUNTIME_ROOT:-"$HOME/Library/Application Support/MBJFW/$DEFAULT_RUNTIME"}
+SDK=${ANDROID_SDK_ROOT:-"$RUNTIME/android-sdk"}
+if [ -n "${JAVA_HOME:-}" ]; then
+    JAVA=$JAVA_HOME
+else
+    JAVA=$(/usr/bin/find "$RUNTIME/jre" -type f -path '*/Contents/Home/bin/java' -perm -111 -print -quit | sed 's#/bin/java$##')
+fi
+if [ -z "$JAVA" ] || [ ! -x "$JAVA/bin/java" ]; then
+    echo "No installed Java runtime found under $RUNTIME/jre" >&2
+    exit 1
+fi
 TOOLS="$SDK/build-tools/35.0.0"
 BUILD="$ROOT/.build/guest-appliance"
 COMPILER=${ECJ_JAR:-"$ROOT/.build/toolchain/ecj-3.39.0.jar"}

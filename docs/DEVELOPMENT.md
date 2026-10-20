@@ -3,7 +3,7 @@
 ## Requirements
 
 - macOS 15 or newer
-- Apple Silicon (the runtime image is ARM64)
+- Apple Silicon or Intel 64-bit Mac (the runtime image and emulator guest match the host architecture)
 - Swift 6 and the Xcode command-line tools
 - `sips`, `iconutil`, `codesign`, `pkgbuild`, and `ditto` for packaging
 
@@ -25,7 +25,7 @@ Create the installer package with:
 ./scripts/build-pkg.sh
 ```
 
-The build output defaults to `dist/MBJFW-1.0.0-macos-arm64.pkg`. Set `MBJFW_PKG_OUTPUT` to write elsewhere. To sign a distributable package, set `MBJFW_APP_SIGNING_IDENTITY` and `MBJFW_INSTALLER_SIGNING_IDENTITY`; see [Distribution](DISTRIBUTION.md) for notarization.
+The build output defaults to `dist/MBJFW-1.0.0-macos-arm64.pkg` on Apple Silicon and `dist/MBJFW-1.0.0-macos-x86_64.pkg` on Intel. Set `MBJFW_PKG_OUTPUT` to write elsewhere. To sign a distributable package, set `MBJFW_APP_SIGNING_IDENTITY` and `MBJFW_INSTALLER_SIGNING_IDENTITY`; see [Distribution](DISTRIBUTION.md) for notarization.
 
 ## Source map
 
@@ -41,7 +41,7 @@ The build output defaults to `dist/MBJFW-1.0.0-macos-arm64.pkg`. Set `MBJFW_PKG_
 
 ## Verification boundaries
 
-`swift test` currently covers APK manifest parsing, download progress parsing, concurrent process-output isolation, profile data/settings coding, the native shared-memory notice round-trip, and backup recovery/tamper rejection. It does not boot multiple emulators, prove Android settings apply to a live profile, test sleep/wake, or measure gameplay latency. Those require a live Mac/Android guest run.
+`swift test` currently covers APK manifest parsing, download progress parsing, concurrent process-output isolation, profile data/settings coding, runtime artifact selection for both host architectures, the native shared-memory notice round-trip, and backup recovery/tamper rejection. CI compiles and packages on both Apple Silicon and Intel macOS runners. It does not boot multiple emulators, prove Android settings apply to a live profile, test sleep/wake, measure gameplay latency, or verify translated Minecraft gameplay on an Intel Mac. Those require a live Mac/Android guest run.
 
 Before a release, verify on the intended reference Mac:
 

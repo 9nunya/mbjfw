@@ -15,8 +15,16 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Test and package app (Apple Silicon)
-    runs-on: macos-15
+    name: Test and package app (${{ matrix.architecture }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm64
+            runner: macos-15
+          - architecture: x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
 
     steps:
@@ -24,12 +32,15 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Verify runner and toolchain
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
-          test "$(uname -m)" = "arm64"
+          test "$(uname -m)" = "$EXPECTED_ARCH"
           sw_vers
           swift --version
           xcodebuild -version
+          file Sources/MBJFW/Resources/mbjfw-hid-arm64 Sources/MBJFW/Resources/mbjfw-hid-x86_64
 
       - name: Run tests
         run: swift test
@@ -38,11 +49,19 @@ jobs:
         run: MBJFW_NO_OPEN=1 ./scripts/package-app.sh --no-open
 
       - name: Verify app bundle
+        env:
+          EXPECTED_ARCH: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
           APP="dist/MBJFW.app"
           test -s "$APP/Contents/MacOS/MBJFW"
           test -s "$APP/Contents/Resources/AppIcon.icns"
+          BUNDLE="$APP/Contents/Resources/MBJFW_MBJFW.bundle"
+          test -s "$BUNDLE/Contents/Info.plist"
+          test -s "$BUNDLE/Contents/Resources/appliance.apk"
+          test -x "$BUNDLE/Contents/Resources/mbjfw-hid-arm64"
+          test -x "$BUNDLE/Contents/Resources/mbjfw-hid-x86_64"
+          test "$(lipo -archs "$APP/Contents/MacOS/MBJFW")" = "$EXPECTED_ARCH"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$APP/Contents/Info.plist")" = "AppIcon"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP/Contents/Info.plist")" = "Minecraft Bedrock Just Fucking Works"
           codesign --verify --deep --strict "$APP"

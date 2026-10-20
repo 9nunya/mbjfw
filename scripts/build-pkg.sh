@@ -3,9 +3,21 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
-APP="$ROOT/dist/MBJFW.app"
+APP=${MBJFW_APP_OUTPUT:-"$ROOT/dist/MBJFW.app"}
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/AppInfo.plist")
-OUTPUT=${MBJFW_PKG_OUTPUT:-"$ROOT/dist/MBJFW-$VERSION-macos-arm64.pkg"}
+HOST_ARCH=$(uname -m)
+PACKAGE_ARCH=${MBJFW_PACKAGE_ARCH:-$HOST_ARCH}
+case "$PACKAGE_ARCH" in
+    arm64|x86_64) ;;
+    *) echo "Unsupported macOS package architecture: $PACKAGE_ARCH" >&2; exit 2 ;;
+esac
+if [ "$PACKAGE_ARCH" != "$HOST_ARCH" ]; then
+    case "${MBJFW_SWIFT_TRIPLE:-}" in
+        "$PACKAGE_ARCH"-apple-macos*) ;;
+        *) echo "Cross-packaging for $PACKAGE_ARCH requires MBJFW_SWIFT_TRIPLE=$PACKAGE_ARCH-apple-macosx<version>." >&2; exit 2 ;;
+    esac
+fi
+OUTPUT=${MBJFW_PKG_OUTPUT:-"$ROOT/dist/MBJFW-$VERSION-macos-$PACKAGE_ARCH.pkg"}
 OUTPUT_DIR=$(dirname -- "$OUTPUT")
 OUTPUT_NAME=$(basename -- "$OUTPUT")
 mkdir -p "$OUTPUT_DIR"
@@ -19,6 +31,11 @@ if [ "${MBJFW_NOTARIZE:-0}" = "1" ]; then
 fi
 
 MBJFW_NO_OPEN=1 "$ROOT/scripts/package-app.sh" --no-open
+ACTUAL_ARCH=$(/usr/bin/lipo -archs "$APP/Contents/MacOS/MBJFW")
+if [ "$ACTUAL_ARCH" != "$PACKAGE_ARCH" ]; then
+    echo "Expected a $PACKAGE_ARCH app bundle, found $ACTUAL_ARCH." >&2
+    exit 1
+fi
 STAGED_APP="$WORK/MBJFW.app"
 /usr/bin/ditto --norsrc --noextattr --noqtn "$APP" "$STAGED_APP"
 /usr/bin/codesign --verify --deep --strict "$STAGED_APP"

@@ -8,7 +8,12 @@ if [ "$#" -ne 1 ]; then
     exit 2
 fi
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-RUNTIME="${MBJFW_RUNTIME_ROOT:-$HOME/Library/Application Support/MBJFW/android-runtime}"
+case "$(uname -m)" in
+    arm64) DEFAULT_RUNTIME=android-runtime ;;
+    x86_64) DEFAULT_RUNTIME=android-runtime-x86_64 ;;
+    *) echo "Unsupported host architecture: $(uname -m)" >&2; exit 2 ;;
+esac
+RUNTIME="${MBJFW_RUNTIME_ROOT:-$HOME/Library/Application Support/MBJFW/$DEFAULT_RUNTIME}"
 PROBE_DIR="${MBJFW_NATIVE_PROBE_DIR:-$ROOT/.build/native-host-probe}"
 mkdir -p "$PROBE_DIR"
 clang++ -std=c++17 -fobjc-arc -dynamiclib -framework AppKit \

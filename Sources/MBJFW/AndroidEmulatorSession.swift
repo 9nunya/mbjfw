@@ -142,13 +142,14 @@ final class AndroidEmulatorSession {
             try await waitForBoot(serial: serial ?? "emulator-5580", paths: paths) { elapsed in
                 progress(.bootingAndroid, "Waiting for Android to finish starting… (\(elapsed)s)")
             }
+            try await verifyGuestArchitecture(serial: serial ?? "emulator-5580", paths: paths)
         }
 
         guard let serial else { throw AndroidEmulatorError.deviceNotReady }
         // An older recovery HOME may auto-open Minecraft during boot. Stop that
         // instance before input, overlays or density can destroy its first surface.
         try await AndroidProcessRunner.run(adb, arguments: ["-s", serial, "shell", "am", "force-stop", "com.mojang.minecraftpe"], environment: paths.environment(javaHome: paths.javaHome), logURL: paths.launchLog)
-        guard let hid = Bundle.module.url(forResource: "mbjfw-hid", withExtension: nil) else {
+        guard let hid = PackagedResourceLocator.url(forResource: paths.architecture.hidResourceName) else {
             throw AndroidEmulatorError.nativeDisplayUnavailable
         }
         progress(.provisioningDevice, "Connecting the HID keyboard and mouse…")
@@ -306,6 +307,26 @@ final class AndroidEmulatorSession {
         throw AndroidEmulatorError.bootTimedOut
     }
 
+    private func verifyGuestArchitecture(serial: String, paths: AndroidSDKPaths) async throws {
+        guard paths.architecture == .x86_64 else { return }
+        let environment = paths.environment(javaHome: paths.javaHome)
+        let nativeBridge = try await AndroidProcessRunner.run(
+            paths.adb,
+            arguments: ["-s", serial, "shell", "getprop", "ro.dalvik.vm.native.bridge"],
+            environment: environment,
+            logURL: paths.launchLog
+        ).trimmingCharacters(in: .whitespacesAndNewlines)
+        let translationLibrary = try? await AndroidProcessRunner.run(
+            paths.adb,
+            arguments: ["-s", serial, "shell", "test", "-f", "/system/lib64/libndk_translation.so"],
+            environment: environment,
+            logURL: paths.launchLog
+        )
+        guard nativeBridge == "libndk_translation.so", translationLibrary != nil else {
+            throw AndroidEmulatorError.armTranslationUnavailable
+        }
+    }
+
     private func resolveLauncherActivity(serial: String, paths: AndroidSDKPaths) async -> String {
         let fallback = "com.mojang.minecraftpe/.MainActivity"
         guard let output = try? await AndroidProcessRunner.run(
@@ -396,6 +417,7 @@ enum AndroidEmulatorError: LocalizedError {
     case controlChannelUnavailable
     case gameLaunchTimedOut
     case nativeDisplayUnavailable
+    case armTranslationUnavailable
     case emulatorSlotsExhausted
     case gameInstallFailed(String)
 
@@ -404,13 +426,15 @@ enum AndroidEmulatorError: LocalizedError {
         case .deviceNotReady:
             "The Android device did not start. Try launching Bedrock again."
         case .bootTimedOut:
-            "Android did not finish starting. Check the emulator log in ~/Library/Application Support/MBJFW/android-runtime/emulator.log."
+            "Android did not finish starting. Check the emulator log in \(NSHomeDirectory())/Library/Application Support/MBJFW/\(RuntimeArchitecture.current.runtimeRootDirectoryName)/emulator.log."
         case .controlChannelUnavailable:
             "The Android device started but its control channel did not respond. Check emulator.log."
         case .gameLaunchTimedOut:
             "Minecraft did not reach the foreground. Android is still running; try again or check launch.log."
         case .nativeDisplayUnavailable:
             "The native game window or HID devices did not become ready. Your profile is preserved. Check emulator.log for details."
+        case .armTranslationUnavailable:
+            "This Intel Android image does not expose Android's ARM64 app translation layer. Minecraft needs that layer to run on Intel; reinstall the Android runtime and try again."
         case .emulatorSlotsExhausted:
             "All Android Emulator slots from 5580 through 5680 are in use. Stop an open profile and try again."
         case let .gameInstallFailed(message):

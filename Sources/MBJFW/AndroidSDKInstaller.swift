@@ -3,11 +3,6 @@ import Foundation
 
 @MainActor
 enum AndroidSDKInstaller {
-    static let systemImage = "system-images;android-35;google_apis;arm64-v8a"
-    static let commandToolsDigest = "835b62a26162b229b441d1f6d4680383815a270809eb33522c0d480fa5002c4e"
-    static let commandToolsURL = "https://dl.google.com/android/repository/commandlinetools-mac_arm64-15859902_latest.zip"
-    static let javaRuntimeURL = "https://api.adoptium.net/v3/binary/latest/21/ga/mac/aarch64/jre/hotspot/normal/eclipse"
-
     static func install(
         at root: URL,
         progress: @escaping @MainActor @Sendable (GameLaunchStage, String, Double?) -> Void
@@ -26,18 +21,20 @@ enum AndroidSDKInstaller {
         try await runSDKManager(paths, javaHome: javaHome, arguments: ["--licenses"], input: String(repeating: "y\n", count: 20)) { line in
             progress(.sdkLicenses, line, Self.fraction(line))
         }
-        progress(.emulatorTools, "Downloading the ARM64 Android emulator tools…", nil)
-        try await runSDKManager(paths, javaHome: javaHome, arguments: ["--install", "emulator", "platform-tools"]) { line in
+        progress(.emulatorTools, "Installing the verified Android emulator for \(paths.architecture.displayName)…", nil)
+        try await installEmulatorIfNeeded(paths, progress: progress)
+        progress(.emulatorTools, "Installing Android platform tools…", nil)
+        try await runSDKManager(paths, javaHome: javaHome, arguments: ["--install", "platform-tools"]) { line in
             progress(.emulatorTools, line, Self.fraction(line))
         }
-        progress(.systemImage, "Downloading the Android ARM64 system image…", nil)
+        progress(.systemImage, "Downloading the Android \(paths.architecture.androidABI) system image…", nil)
         try await installSystemImage(paths, progress: progress)
         progress(.device, "Creating your isolated Android device…", nil)
         let avdINI = paths.avdHome.appending(path: "MBJFW.ini")
         if !FileManager.default.fileExists(atPath: avdINI.path) {
             try await AndroidProcessRunner.run(
                 paths.avdManager,
-                arguments: ["create", "avd", "-n", "MBJFW", "-k", systemImage, "-d", "pixel_8", "--force"],
+                arguments: ["create", "avd", "-n", "MBJFW", "-k", paths.architecture.systemImage, "-d", "pixel_8", "--force"],
                 environment: paths.environment(javaHome: javaHome),
                 logURL: paths.setupLog,
                 input: "no\n"
@@ -90,7 +87,7 @@ enum AndroidSDKInstaller {
     private static func installJavaIfNeeded(_ paths: AndroidSDKPaths, progress: @escaping @MainActor @Sendable (GameLaunchStage, String, Double?) -> Void) async throws -> URL {
         if let javaHome = paths.javaHome { return javaHome }
         let archive = paths.downloads.appending(path: "temurin-jre21.tar.gz")
-        try await download(try remoteURL(javaRuntimeURL), to: archive, stage: .javaRuntime, paths: paths, progress: progress)
+        try await download(try remoteURL(paths.architecture.javaRuntimeURL), to: archive, stage: .javaRuntime, paths: paths, progress: progress)
         try FileManager.default.createDirectory(at: paths.jreRoot, withIntermediateDirectories: true)
         try await AndroidProcessRunner.run(
             URL(fileURLWithPath: "/usr/bin/tar"),
@@ -105,10 +102,10 @@ enum AndroidSDKInstaller {
     private static func installCommandToolsIfNeeded(_ paths: AndroidSDKPaths, progress: @escaping @MainActor @Sendable (GameLaunchStage, String, Double?) -> Void) async throws {
         guard !FileManager.default.isExecutableFile(atPath: paths.sdkManager.path) else { return }
         let archive = paths.downloads.appending(path: "android-commandlinetools.zip")
-        try await download(try remoteURL(commandToolsURL), to: archive, stage: .commandLineTools, paths: paths, progress: progress)
+        try await download(try remoteURL(paths.architecture.commandToolsURL), to: archive, stage: .commandLineTools, paths: paths, progress: progress)
         progress(.commandLineTools, "Verifying Android command-line tools…", nil)
         let digest = try sha256(archive)
-        guard digest == commandToolsDigest else { throw AndroidSetupError.commandToolsChecksumMismatch }
+        guard digest == paths.architecture.commandToolsSHA256 else { throw AndroidSetupError.commandToolsChecksumMismatch }
         let staging = paths.downloads.appending(path: "command-tools-unpacked")
         if FileManager.default.fileExists(atPath: staging.path) {
             try FileManager.default.removeItem(at: staging)
@@ -129,13 +126,13 @@ enum AndroidSDKInstaller {
     }
 
     private static func installSystemImage(_ paths: AndroidSDKPaths, progress: @escaping @MainActor @Sendable (GameLaunchStage, String, Double?) -> Void) async throws {
-        let imageDirectory = paths.sdkRoot.appending(path: "system-images/android-35/google_apis/arm64-v8a")
+        let imageDirectory = paths.systemImageDirectory
         let systemImage = imageDirectory.appending(path: "system.img")
         guard !FileManager.default.fileExists(atPath: systemImage.path) else { return }
         try await ensureSystemImageArchive(paths, progress: progress)
 
-        // The archive stores its payload under a top-level arm64-v8a/ directory, so unpack it
-        // into the google_apis package root, not into the arm64-v8a directory itself. Clear any
+        // The archive stores its payload under a top-level ABI directory, so unpack it into the
+        // google_apis package root, not into the ABI directory itself. Clear any
         // partial previous unpack (including a stale Android installer marker) first.
         let packageRoot = imageDirectory.deletingLastPathComponent()
         if FileManager.default.fileExists(atPath: imageDirectory.path) {
@@ -153,17 +150,69 @@ enum AndroidSDKInstaller {
         }
     }
 
+    private static func installEmulatorIfNeeded(_ paths: AndroidSDKPaths, progress: @escaping @MainActor @Sendable (GameLaunchStage, String, Double?) -> Void) async throws {
+        if paths.hasExpectedEmulator { return }
+        let archive = paths.emulatorArchive
+        if FileManager.default.fileExists(atPath: archive.path), !(await archiveIsValid(archive, paths: paths)) {
+            try FileManager.default.removeItem(at: archive)
+        }
+        if !FileManager.default.fileExists(atPath: archive.path) {
+            try await download(try remoteURL(paths.architecture.emulatorArchiveURL), to: archive, stage: .emulatorTools, paths: paths, progress: progress)
+        }
+        progress(.emulatorTools, "Verifying the downloaded emulator archive…", nil)
+        guard await archiveIsValid(archive, paths: paths) else {
+            try? FileManager.default.removeItem(at: archive)
+            throw AndroidSetupError.emulatorArchiveVerificationFailed
+        }
+
+        progress(.emulatorTools, "Extracting the pinned emulator runtime…", nil)
+        let staging = paths.downloads.appending(path: "emulator-unpacked")
+        if FileManager.default.fileExists(atPath: staging.path) { try FileManager.default.removeItem(at: staging) }
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        try await AndroidProcessRunner.run(
+            URL(fileURLWithPath: "/usr/bin/unzip"),
+            arguments: ["-q", "-o", archive.path, "-d", staging.path],
+            environment: [:],
+            logURL: paths.setupLog
+        )
+        let stagedEmulator = staging.appending(path: "emulator")
+        let revision = try String(contentsOf: stagedEmulator.appending(path: "source.properties"), encoding: .utf8)
+        guard revision.contains("Pkg.Revision=\(paths.architecture.emulatorRevision)"),
+              revision.contains("Pkg.BuildId=\(paths.architecture.emulatorBuildID)"),
+              FileManager.default.isExecutableFile(atPath: stagedEmulator.appending(path: "emulator").path),
+              FileManager.default.isExecutableFile(atPath: stagedEmulator.appending(path: "qemu/\(paths.architecture.qemuHostDirectory)/\(paths.architecture.qemuGuestExecutable)").path) else {
+            try? FileManager.default.removeItem(at: staging)
+            throw AndroidSetupError.emulatorArchiveIncomplete
+        }
+
+        let destination = paths.sdkRoot.appending(path: "emulator")
+        let previous = paths.downloads.appending(path: "emulator-previous")
+        progress(.emulatorTools, "Installing the verified emulator runtime…", nil)
+        if FileManager.default.fileExists(atPath: previous.path) { try FileManager.default.removeItem(at: previous) }
+        if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.moveItem(at: destination, to: previous) }
+        do {
+            try FileManager.default.moveItem(at: stagedEmulator, to: destination)
+            if FileManager.default.fileExists(atPath: previous.path) { try FileManager.default.removeItem(at: previous) }
+        } catch {
+            if !FileManager.default.fileExists(atPath: destination.path), FileManager.default.fileExists(atPath: previous.path) {
+                try? FileManager.default.moveItem(at: previous, to: destination)
+            }
+            throw error
+        }
+        try? FileManager.default.removeItem(at: staging)
+    }
+
     private static func ensureSystemImageArchive(_ paths: AndroidSDKPaths, progress: @escaping @MainActor @Sendable (GameLaunchStage, String, Double?) -> Void) async throws {
         let archive = paths.systemImageArchive
         if FileManager.default.fileExists(atPath: archive.path) {
-            if await archiveIsValid(paths) { return }
+            if await archiveIsValid(archive, paths: paths) { return }
             // A resume gone wrong can leave the file larger than the original (appended ranges),
             // so a corrupt archive is discarded instead of being resumed again.
             try FileManager.default.removeItem(at: archive)
         }
         for _ in 0..<2 {
             try await downloadSystemImage(paths, progress: progress)
-            if await archiveIsValid(paths) { return }
+            if await archiveIsValid(archive, paths: paths) { return }
             try FileManager.default.removeItem(at: archive)
         }
         throw AndroidSetupError.systemImageVerificationFailed
@@ -175,7 +224,7 @@ enum AndroidSDKInstaller {
             arguments: [
                 "-fL", "--show-error", "--retry", "100", "--retry-all-errors",
                 "--retry-delay", "3", "--continue-at", "-",
-                "https://dl.google.com/android/repository/sys-img/google_apis/arm64-v8a-35_r09.zip",
+                paths.architecture.systemImageArchiveURL,
                 "-o", paths.systemImageArchive.path
             ],
             environment: [:],
@@ -187,10 +236,10 @@ enum AndroidSDKInstaller {
         )
     }
 
-    private static func archiveIsValid(_ paths: AndroidSDKPaths) async -> Bool {
+    private static func archiveIsValid(_ archive: URL, paths: AndroidSDKPaths) async -> Bool {
         (try? await AndroidProcessRunner.run(
             URL(fileURLWithPath: "/usr/bin/unzip"),
-            arguments: ["-t", paths.systemImageArchive.path],
+            arguments: ["-t", archive.path],
             environment: [:],
             logURL: paths.setupLog
         )) != nil
@@ -250,11 +299,13 @@ enum AndroidSDKInstaller {
 
 struct AndroidSDKPaths {
     let root: URL
+    let architecture: RuntimeArchitecture
     private let sessionLogDirectory: URL?
 
-    init(root: URL, sessionLogDirectory: URL? = nil) {
+    init(root: URL, sessionLogDirectory: URL? = nil, architecture: RuntimeArchitecture = .current) {
         self.root = root
         self.sessionLogDirectory = sessionLogDirectory
+        self.architecture = architecture
     }
 
     var sdkRoot: URL { root.appending(path: "android-sdk") }
@@ -265,16 +316,26 @@ struct AndroidSDKPaths {
     var adb: URL { sdkRoot.appending(path: "platform-tools/adb") }
     var sdkManager: URL { sdkRoot.appending(path: "cmdline-tools/latest/bin/sdkmanager") }
     var avdManager: URL { sdkRoot.appending(path: "cmdline-tools/latest/bin/avdmanager") }
+    var emulatorArchive: URL { downloads.appending(path: architecture.emulatorArchiveName) }
     var setupLog: URL { root.appending(path: "setup.log") }
     var launchLog: URL { (sessionLogDirectory ?? root).appending(path: "launch.log") }
     var importLog: URL { root.appending(path: "import.log") }
     var emulatorLog: URL { (sessionLogDirectory ?? root).appending(path: "emulator.log") }
-    var systemImageArchive: URL { downloads.appending(path: "android-35-google-apis-arm64.zip") }
+    var systemImageDirectory: URL { sdkRoot.appending(path: architecture.systemImageDirectory) }
+    var systemImageArchive: URL { downloads.appending(path: architecture.systemImageArchiveName) }
+
+    var hasExpectedEmulator: Bool {
+        guard let revision = try? String(contentsOf: sdkRoot.appending(path: "emulator/source.properties"), encoding: .utf8) else { return false }
+        return revision.contains("Pkg.Revision=\(architecture.emulatorRevision)")
+            && revision.contains("Pkg.BuildId=\(architecture.emulatorBuildID)")
+            && FileManager.default.isExecutableFile(atPath: emulator.path)
+            && FileManager.default.isExecutableFile(atPath: sdkRoot.appending(path: "emulator/qemu/\(architecture.qemuHostDirectory)/\(architecture.qemuGuestExecutable)").path)
+    }
 
     var isReady: Bool {
-        FileManager.default.isExecutableFile(atPath: emulator.path)
+        hasExpectedEmulator
             && FileManager.default.isExecutableFile(atPath: adb.path)
-            && FileManager.default.fileExists(atPath: sdkRoot.appending(path: "system-images/android-35/google_apis/arm64-v8a/system.img").path)
+            && FileManager.default.fileExists(atPath: systemImageDirectory.appending(path: "system.img").path)
             && FileManager.default.fileExists(atPath: avdHome.appending(path: "MBJFW.ini").path)
     }
 
@@ -304,6 +365,8 @@ enum AndroidSetupError: LocalizedError {
     case downloadURLInvalid
     case systemImageIncomplete
     case systemImageVerificationFailed
+    case emulatorArchiveIncomplete
+    case emulatorArchiveVerificationFailed
     case downloadFailed(String)
 
     var errorDescription: String? {
@@ -318,6 +381,10 @@ enum AndroidSetupError: LocalizedError {
             "The Android system image download did not contain system.img."
         case .systemImageVerificationFailed:
             "The Android system image download failed its integrity check. Check your internet connection and try again."
+        case .emulatorArchiveIncomplete:
+            "The Android Emulator archive did not contain the verified host runtime and guest binary. Your profile data was preserved."
+        case .emulatorArchiveVerificationFailed:
+            "The Android Emulator download failed archive verification. Check your connection and try again."
         case let .downloadFailed(url):
             "The download failed: \(url)"
         }

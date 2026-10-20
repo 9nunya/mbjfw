@@ -114,7 +114,7 @@ struct SettingsView: View {
             }
 
             Section("Runtime") {
-                LabeledContent("Android", value: runtime.isReady ? "Android 15 · ARM64" : "Not installed")
+                LabeledContent("Android", value: runtime.isReady ? RuntimeArchitecture.current.runtimeDescription : "Not installed")
                 LabeledContent("Renderer", value: library.accounts.selectedAccount.settings.graphicsMode == "software" ? "Software" : "Mac GPU · Vulkan")
                 LabeledContent("Game data", value: "Separate for each profile")
                 if let failure = CatalogStore.shared.failure ?? library.accounts.persistenceError {

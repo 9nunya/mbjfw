@@ -39,7 +39,8 @@ static void* runProbe(void*) {
 __attribute__((constructor)) static void startProbe() {
     if (!std::getenv("MBJFW_NATIVE_PROBE")) return;
     char executable[4096]; uint32_t size=sizeof(executable);
-    if (_NSGetExecutablePath(executable,&size)!=0 || !strstr(executable,"qemu-system-aarch64")) return;
+    if (_NSGetExecutablePath(executable,&size)!=0 ||
+        (!strstr(executable,"qemu-system-aarch64") && !strstr(executable,"qemu-system-x86_64"))) return;
     pthread_t thread;
     if (pthread_create(&thread,nullptr,runProbe,nullptr)==0) pthread_detach(thread);
 }

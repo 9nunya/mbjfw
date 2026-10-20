@@ -3,6 +3,16 @@ import AppKit
 @MainActor
 final class LauncherApplicationDelegate: NSObject, NSApplicationDelegate {
     weak var library: GameLibrary?
+    private var updateCheckStarted = false
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !updateCheckStarted else { return }
+        updateCheckStarted = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(3))
+            await AppUpdateService.checkAndPrompt()
+        }
+    }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         library?.runtime.applicationBecameActive()

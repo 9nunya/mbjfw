@@ -72,7 +72,7 @@ enum AndroidAppliancePolicy {
     }
 
     static func provisionKiosk(serial: String, dataDirectory: URL, paths: AndroidSDKPaths) async throws {
-        guard let apk = Bundle.module.url(forResource: "appliance", withExtension: "apk") else {
+        guard let apk = PackagedResourceLocator.url(forResource: "appliance", withExtension: "apk") else {
             throw AndroidEmulatorError.nativeDisplayUnavailable
         }
         let digest = SHA256.hash(data: try Data(contentsOf: apk)).map { String(format: "%02x", $0) }.joined()
