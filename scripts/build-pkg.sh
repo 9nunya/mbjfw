@@ -48,9 +48,19 @@ COMPONENTS="$WORK/components.plist"
 /bin/mkdir -p "$STAGING_ROOT/Applications"
 /usr/bin/ditto --norsrc --noextattr --noqtn "$STAGED_APP" "$STAGING_ROOT/Applications/MBJFW.app"
 /usr/bin/pkgbuild --analyze --root "$STAGING_ROOT" "$COMPONENTS"
-/usr/libexec/PlistBuddy -c 'Add :0:BundleIsRelocatable bool false' "$COMPONENTS"
-/usr/libexec/PlistBuddy -c 'Set :0:BundleIsVersionChecked false' "$COMPONENTS"
-/usr/libexec/PlistBuddy -c 'Set :0:BundleOverwriteAction upgrade' "$COMPONENTS"
+set_component_value() {
+    KEY=$1
+    TYPE=$2
+    VALUE=$3
+    if /usr/libexec/PlistBuddy -c "Print :0:$KEY" "$COMPONENTS" >/dev/null 2>&1; then
+        /usr/libexec/PlistBuddy -c "Set :0:$KEY $VALUE" "$COMPONENTS"
+    else
+        /usr/libexec/PlistBuddy -c "Add :0:$KEY $TYPE $VALUE" "$COMPONENTS"
+    fi
+}
+set_component_value BundleIsRelocatable bool false
+set_component_value BundleIsVersionChecked bool false
+set_component_value BundleOverwriteAction string upgrade
 set -- --root "$STAGING_ROOT" \
     --component-plist "$COMPONENTS" \
     --identifier dev.mbjfw.launcher.pkg \
